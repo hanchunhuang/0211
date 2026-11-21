@@ -1,0 +1,216 @@
+"""Webhook 伺服器 + 每日排程。
+
+啟動：uvicorn feedbackbot.app:app --host 0.0.0.0 --port 8000
+LINE Developers 的 Webhook URL 設為 https://你的網域/callback
+"""
+from __future__ import annotations
+
+import logging
+import threading
+from contextlib import asynccontextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+
+from . import commands, pipeline
+from .config import Settings
+from .db import DB
+from .line_api import LineClient, verify_signature
+from .llm import ClaudeLLM
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("feedbackbot")
+
+
+class Bot:
+    def __init__(self, settings: Settings | None = None, db: DB | None = None, line=None, llm=None):
+        self.s = settings or Settings()
+        self.s.ensure_dirs()
+        self.db = db or DB(self.s.db_path)
+        self.line = line or LineClient(self.s.line_access_token)
+        self.llm = llm or ClaudeLLM(self.s.claude_model)
+        self.tz = ZoneInfo(self.s.timezone)
+        self._names: dict[tuple[str, str], str] = {}
+
+    def now(self) -> datetime:
+        return datetime.now(self.tz)
+
+    # ---------------- 通知管理者 ----------------
+    def notify_admins(self, text: str) -> None:
+        for uid in self.s.admin_user_ids:
+            try:
+                self.line.push(uid, text)
+            except Exception:  # noqa: BLE001
+                log.exception("notify admin failed")
+
+    # ---------------- 排程工作 ----------------
+    def job_digest(self) -> str:
+        try:
+            res = pipeline.digest(self.db, self.llm, self.s, self.now())
+            msg = res.admin_summary + (f"\n\n完整日報：{res.report_path}" if res.report_path else "")
+        except Exception as e:  # noqa: BLE001
+            log.exception("digest failed")
+            msg = f"⚠️ 整理回饋失敗：{e}"
+        self.notify_admins(msg)
+        return msg
+
+    def job_announce(self) -> str:
+        try:
+            res = pipeline.prepare_announcements(self.db, self.llm, self.s, self.now())
+            msg = res.admin_summary
+            if res.evaluation_path:
+                msg += f"\n\n成效評估報告：{res.evaluation_path}"
+            if self.s.auto_push and res.draft_ids:
+                results = pipeline.send_announcements(self.db, self.line, self.now(), res.draft_ids)
+                msg += "\n\n" + "\n".join(f"草稿 {i}：{r}" for i, r in results)
+        except Exception as e:  # noqa: BLE001
+            log.exception("announce failed")
+            msg = f"⚠️ 產生公告失敗：{e}"
+        self.notify_admins(msg)
+        return msg
+
+    # ---------------- Webhook 事件 ----------------
+    def handle_event(self, ev: dict) -> None:
+        etype = ev.get("type")
+        src = ev.get("source", {})
+        chat_id = src.get("groupId") or src.get("roomId")
+        ts = datetime.fromtimestamp(ev.get("timestamp", 0) / 1000, self.tz)
+
+        if etype == "join" and chat_id:
+            name = self.line.group_name(chat_id) if src.get("groupId") else None
+            self.db.upsert_group(chat_id, ts, name)
+            self.notify_admins(f"🤖 已加入群組「{name or chat_id}」。可在該群組輸入 /company 公司名 設定公司名稱。")
+            return
+        if etype == "leave" and chat_id:
+            self.db.deactivate_group(chat_id)
+            return
+        if etype != "message":
+            return
+
+        msg = ev["message"]
+        user_id = src.get("userId")
+        text = msg.get("text", "") if msg.get("type") == "text" else ""
+        is_admin = user_id in self.s.admin_user_ids
+        reply_token = ev.get("replyToken")
+
+        # ---- 1 對 1 私訊：只處理管理者指令 ----
+        if src.get("type") == "user":
+            if text.strip().lower() == "/whoami":
+                self.line.reply(reply_token, f"你的 userId：{user_id}")
+            elif is_admin and text.startswith("/"):
+                self._run_command(text, reply_token, user_id, None)
+            return
+
+        if not chat_id:
+            return
+        if not self.db.one("SELECT 1 FROM groups WHERE id=?", (chat_id,)):
+            name = self.line.group_name(chat_id) if src.get("groupId") else None
+            self.db.upsert_group(chat_id, ts, name)
+
+        # ---- 群組內管理者指令（不收進回饋）----
+        if is_admin and text.startswith("/"):
+            self._run_command(text, reply_token, user_id, chat_id)
+            return
+
+        # ---- 默默收集 ----
+        kind = msg.get("type")
+        record = {
+            "line_message_id": msg.get("id"),
+            "group_id": chat_id,
+            "user_id": user_id,
+            "display_name": self._display_name(chat_id, user_id),
+            "created_at": ts.isoformat(),
+            "quoted_message_id": msg.get("quotedMessageId"),
+        }
+        if kind == "text":
+            self.db.add_message(kind="text", text=text, **record)
+        elif kind == "image":
+            path = self.line.download_content(msg["id"], self.s.images_dir / chat_id[-8:] / msg["id"])
+            self.db.add_message(kind="image", image_path=str(path) if path else None, **record)
+        elif kind == "file":
+            self.db.add_message(kind="file", text=msg.get("fileName"), **record)
+        # 貼圖、影片、語音等不收
+
+    def _display_name(self, chat_id: str, user_id: str | None) -> str | None:
+        if not user_id:
+            return None
+        key = (chat_id, user_id)
+        if key not in self._names:
+            try:
+                self._names[key] = self.line.member_name(chat_id, user_id) or ""
+            except Exception:  # noqa: BLE001
+                self._names[key] = ""
+        return self._names[key] or None
+
+    def _run_command(self, text: str, reply_token: str, user_id: str, group_id: str | None) -> None:
+        cmd = text.split()[0].lower()
+        ctx = commands.Ctx(db=self.db, line=self.line, now=self.now, group_id=group_id,
+                           run_digest=self.job_digest, run_announce=self.job_announce)
+        if cmd in ("/today", "/announce"):
+            # 需要呼叫 AI，時間較長：先回覆，再在背景執行，完成後推播給管理者
+            self.line.reply(reply_token, "⏳ 處理中，完成後會私訊通知你…")
+            threading.Thread(target=commands.handle, args=(ctx, text), daemon=True).start()
+            return
+        self.line.reply(reply_token, commands.handle(ctx, text))
+
+    # ---------------- 排程 ----------------
+    def start_scheduler(self) -> BackgroundScheduler:
+        sched = BackgroundScheduler(timezone=self.tz)
+        h, m = self.s.digest_at.split(":")
+        sched.add_job(self.job_digest, CronTrigger(hour=int(h), minute=int(m), timezone=self.tz),
+                      id="digest", misfire_grace_time=3600, coalesce=True)
+        h, m = self.s.announce_at.split(":")
+        sched.add_job(self.job_announce, CronTrigger(hour=int(h), minute=int(m), timezone=self.tz),
+                      id="announce", misfire_grace_time=3600, coalesce=True)
+        sched.start()
+        log.info("scheduler started: digest %s, announce %s (%s)", self.s.digest_at, self.s.announce_at, self.tz)
+        return sched
+
+
+def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
+    state: dict = {"bot": bot}
+
+    def get_bot() -> Bot:
+        if state["bot"] is None:
+            state["bot"] = Bot()
+        return state["bot"]
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        b = get_bot()
+        sched = b.start_scheduler() if start_scheduler else None
+        yield
+        if sched:
+            sched.shutdown(wait=False)
+
+    api = FastAPI(title="LINE Feedback Bot", lifespan=lifespan)
+
+    @api.get("/healthz")
+    def healthz() -> dict:
+        return {"ok": True}
+
+    @api.post("/callback")
+    async def callback(request: Request, background: BackgroundTasks) -> dict:
+        b = get_bot()
+        body = await request.body()
+        if not verify_signature(b.s.line_channel_secret, body, request.headers.get("x-line-signature")):
+            raise HTTPException(status_code=400, detail="invalid signature")
+        payload = await request.json()
+        for ev in payload.get("events", []):
+            background.add_task(_safe_handle, b, ev)
+        return {"ok": True}  # LINE 要求盡快回 200
+
+    return api
+
+
+def _safe_handle(bot: Bot, ev: dict) -> None:
+    try:
+        bot.handle_event(ev)
+    except Exception:  # noqa: BLE001
+        log.exception("handle event failed: %s", ev.get("type"))
+
+
+app = create_app()
