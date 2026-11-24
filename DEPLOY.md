@@ -107,7 +107,7 @@ sudo cp /srv/feedback-bot/app/deploy/feedbackbot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now feedbackbot
 sudo systemctl status feedbackbot            # 看到 active (running) 就成功
-curl http://127.0.0.1:8001/healthz           # 應回 {"ok":true}
+curl http://127.0.0.1:8001/health           # 應回 {"ok":true}
 ```
 
 看即時紀錄：`sudo journalctl -u feedbackbot -f`
@@ -120,7 +120,7 @@ sudo sed -i 's/feedback.example.com/你的網域/' /etc/nginx/sites-available/fe
 sudo ln -s /etc/nginx/sites-available/feedbackbot /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 sudo certbot --nginx -d 你的網域             # 自動申請 HTTPS 憑證並設定自動更新
-curl https://你的網域/healthz               # 應回 {"ok":true}
+curl https://你的網域/health               # 應回 {"ok":true}
 ```
 
 ## 10. 設定 LINE 頻道
@@ -185,7 +185,7 @@ sudo systemctl restart feedbackbot
 
 | 狀況 | 原因與處理 |
 |---|---|
-| LINE 按 Verify 失敗 | `curl https://你的網域/healthz` 不通 → 檢查 DNS、Nginx、HTTPS。回 400 → `LINE_CHANNEL_SECRET` 填錯 |
+| LINE 按 Verify 失敗 | `curl https://你的網域/health` 不通 → 檢查 DNS、Nginx、HTTPS。回 400 → `LINE_CHANNEL_SECRET` 填錯 |
 | 網頁出現 502 Bad Gateway | 機器人沒在跑：`sudo systemctl status feedbackbot`，看 `journalctl -u feedbackbot -n 50` 的錯誤 |
 | 私訊 `/help` 沒反應 | `ADMIN_USER_IDS` 沒填或填錯，改完要 `restart` |
 | 後台顯示「後台未啟用」 | `.env` 沒設 `ADMIN_WEB_PASSWORD` |

@@ -249,6 +249,8 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
             resp.headers["Cache-Control"] = "private, no-store"
         return resp
 
+    # Cloud Run 會攔截結尾是 z 的網址（例如 /healthz），所以主要用 /health
+    @api.get("/health")
     @api.get("/healthz")
     def healthz() -> dict:
         return {"ok": True}

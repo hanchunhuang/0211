@@ -120,7 +120,7 @@ gcloud run deploy feedbackbot --source . --region $REGION \
   --set-secrets "LINE_CHANNEL_SECRET=line-channel-secret:latest,LINE_CHANNEL_ACCESS_TOKEN=line-channel-token:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest,ADMIN_WEB_PASSWORD=admin-web-password:latest,REPO_URL=repo-url:latest,TASK_TOKEN=task-token:latest,SESSION_SECRET=session-secret:latest"
 
 RUN_URL=$(gcloud run services describe feedbackbot --region $REGION --format='value(status.url)')
-curl $RUN_URL/healthz     # 應回 {"ok":true}
+curl $RUN_URL/health     # 應回 {"ok":true}
 ```
 
 參數說明：
@@ -136,7 +136,7 @@ curl $RUN_URL/healthz     # 應回 {"ok":true}
 ```bash
 firebase use $PROJECT_ID
 firebase deploy --only hosting
-curl https://$PROJECT_ID.web.app/healthz     # 應回 {"ok":true}
+curl https://$PROJECT_ID.web.app/health     # 應回 {"ok":true}
 ```
 
 這會把 `firebase.json` 裡的設定部署上去，所有網址都轉給 Cloud Run 的 `feedbackbot`。
@@ -239,7 +239,7 @@ gcloud firestore backups schedules create --database='(default)' --recurrence=da
 
 | 狀況 | 原因與處理 |
 |---|---|
-| LINE 按 Verify 失敗 | `curl https://你的網域/healthz` 不通 → 檢查 Hosting 是否部署、自訂網域憑證是否完成。回 400 → LINE secret 填錯 |
+| LINE 按 Verify 失敗 | `curl https://你的網域/health` 不通 → 檢查 Hosting 是否部署、自訂網域憑證是否完成。回 400 → LINE secret 填錯 |
 | 看錯誤紀錄 | Google Cloud 主控台 → Cloud Run → feedbackbot → 記錄；或 `gcloud run services logs read feedbackbot --region $REGION --limit 50` |
 | 後台出現 `The query requires an index` | 步驟 2 的索引還沒建好（要幾分鐘）；或 `FIRESTORE_PREFIX` 改過，要用新前綴重跑索引腳本 |
 | 後台登入後又跳回登入頁 | `PUBLIC_BASE_URL` 要和瀏覽器網址列的網域一致（包含 https://） |
