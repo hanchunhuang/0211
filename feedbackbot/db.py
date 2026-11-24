@@ -92,6 +92,15 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(issues)")}
+        if "fix_commits" not in cols:
+            self.conn.execute("ALTER TABLE issues ADD COLUMN fix_commits TEXT")  # JSON list of commit hash
+        if "auto_resolved" not in cols:
+            self.conn.execute("ALTER TABLE issues ADD COLUMN auto_resolved INTEGER NOT NULL DEFAULT 0")
+        self.conn.commit()
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:

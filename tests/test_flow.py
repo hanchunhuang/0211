@@ -16,8 +16,11 @@ from feedbackbot.app import Bot, create_app
 from feedbackbot.config import Settings
 from feedbackbot.db import DB
 from feedbackbot.line_api import split_text, verify_signature
-from feedbackbot.llm import (Analysis, Assignment, Clustering, Evaluation, EvaluationReport, Extraction,
-                             ExtractedFeedback, NewIssue)
+import subprocess
+
+from feedbackbot.llm import (Analysis, Assignment, Clustering, CommitMatch, CommitMatching, Evaluation,
+                             EvaluationReport, Extraction, ExtractedFeedback, NewIssue)
+from feedbackbot.repo import CodeRepo
 
 TZ = ZoneInfo("Asia/Taipei")
 SECRET = "test-secret"
@@ -40,6 +43,7 @@ class FakeLLM:
     RULES = [("匯出", "bug", "匯出缺出貨日期"), ("庫存", "feature", "低庫存提醒")]
 
     def extract(self, company, transcript, images):
+        self.transcripts.append(transcript)
         items = []
         for line in transcript.splitlines():
             m = re.match(r"#(\d+) \[[^\]]+\] (\S+?)(?:（[^）]*）)?: (.*)", line)
@@ -63,10 +67,27 @@ class FakeLLM:
             assignments.append(Assignment(feedback_id=f["feedback_id"], issue_id=0, new_issue_key=keys[f["title"]]))
         return Clustering(assignments=assignments, new_issues=new)
 
-    def analyze(self, issue, feedback, system_context):
+    def __init__(self):
+        self.transcripts = []
+        self.analyze_had_repo = None
+
+    def analyze(self, issue, feedback, system_context, repo=None):
+        self.analyze_had_repo = repo is not None
         return Analysis(understanding="u", root_cause="匯出欄位未包含", proposed_changes=["加欄位"],
                         affected_area="訂單匯出", effort="S", priority="P1", risks=[], questions_to_confirm=[],
-                        acceptance_checks=["匯出後有出貨日期"])
+                        acceptance_checks=["匯出後有出貨日期"], files_to_change=[], user_path="訂單管理 → 匯出")
+
+    def match_commits(self, open_issues, commits, system_context, repo=None):
+        matches = []
+        for c in commits:
+            for i in open_issues:
+                if "出貨日期" in c["subject"] and i["title"] == "匯出缺出貨日期":
+                    matches.append(CommitMatch(issue_id=i["id"], commit_hashes=[c["hash"]], how_fixed="匯出加上出貨日期",
+                                               where="訂單管理 → 匯出 Excel", confidence="high", reason="r"))
+                if "庫存" in c["subject"] and i["title"] == "低庫存提醒":
+                    matches.append(CommitMatch(issue_id=i["id"], commit_hashes=[c["hash"]], how_fixed="x",
+                                               where="y", confidence="medium", reason="只做了一部分"))
+        return CommitMatching(matches=matches)
 
     def evaluate(self, resolved):
         return EvaluationReport(overview="整體良好", evaluations=[
@@ -90,6 +111,8 @@ def env(tmp_path):
     s.reports_dir = tmp_path / "reports"
     s.system_context_file = tmp_path / "none.md"
     s.auto_push = False
+    s.staff_user_ids = ["Ustaff"]
+    s.repo_auto_update = False
     line = FakeLine()
     bot = Bot(settings=s, db=DB(":memory:"), line=line, llm=FakeLLM())
     client = TestClient(create_app(bot, start_scheduler=False))
@@ -134,16 +157,18 @@ def test_full_daily_cycle(env):
          text_ev(GA, "U1", "大家中午吃什麼？"),
          text_ev(GA, "U3", "可以加庫存不足提醒嗎"),
          text_ev(GB, "U2", "匯出報表少了出貨日"),
-         text_ev(GA, ADMIN, "/company 甲公司"))  # 管理者指令不會被收進回饋
+         text_ev(GA, "Ustaff", "這個我們確認一下"),
+         text_ev(GA, ADMIN, "/center 甲公司"))  # 管理者指令不會被收進回饋
     assert bot.db.group_label(GA) == "甲公司"
-    assert bot.db.one("SELECT COUNT(*) c FROM messages")["c"] == 4
+    assert bot.db.one("SELECT COUNT(*) c FROM messages")["c"] == 5
 
     # ---- 晚上：整理 ----
     res = pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
     assert res.new_feedback == 3
+    assert any("（客服）" in t for t in bot.llm.transcripts)
     report = res.report_path.read_text(encoding="utf-8")
     common = report.split("## 一、共同問題")[1].split("## 二、")[0]
-    single = report.split("## 二、單一公司問題")[1].split("## 三、")[0]
+    single = report.split("## 二、單一中心問題")[1].split("## 三、")[0]
     assert "匯出缺出貨日期" in common and "甲公司" in common and "乙公司" in common
     assert "低庫存提醒" in single
     assert "大家中午吃什麼" not in report
@@ -179,3 +204,59 @@ def test_non_admin_dm_is_silent(env):
     assert line.replies == []
     post(client, text_ev(None, "U1", "/whoami"))
     assert "U1" in line.replies[-1]
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def code_repo(tmp_path):
+    path = tmp_path / "system"
+    path.mkdir()
+    _git(path, "init", "-q", "-b", "master")
+    _git(path, "config", "user.email", "t@example.com")
+    _git(path, "config", "user.name", "t")
+    (path / "a.php").write_text("<?php // 訂單匯出\n", encoding="utf-8")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", "feat: 初始")
+    return CodeRepo(path)
+
+
+def test_repo_tools(code_repo):
+    assert "a.php:1" in code_repo.search("訂單匯出")
+    assert "（檔案不存在或不在專案內）" == code_repo.read("../../etc/passwd")
+    (code_repo.path / "b.php").write_text("x\n")
+    _git(code_repo.path, "add", "-A")
+    _git(code_repo.path, "commit", "-q", "-m", "fix: 第二個", "-m", "說明內文")
+    cs = code_repo.commits_since(None)
+    assert [c.subject for c in cs] == ["feat: 初始", "fix: 第二個"]
+    assert cs[-1].files == ["b.php"] and cs[-1].body == "說明內文"
+    assert [c.subject for c in code_repo.commits_since(cs[0].hash)] == ["fix: 第二個"]
+
+
+def test_commit_sync_resolves_issues(env, code_repo):
+    bot, line, client = env
+    bot.repo = code_repo
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"), text_ev(GA, "U3", "希望有庫存提醒"))
+    pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ), repo=code_repo)
+    assert bot.llm.analyze_had_repo is True
+    # 第一次同步：只記錄基準（初始 commit 不配對到問題）
+    pipeline.sync_commits(bot.db, bot.llm, bot.s, code_repo, datetime(2026, 11, 22, 8, 0, tzinfo=TZ))
+    (code_repo.path / "a.php").write_text("<?php // 訂單匯出 出貨日期\n", encoding="utf-8")
+    _git(code_repo.path, "commit", "-qam", "fix: 訂單匯出加入出貨日期欄位")
+    (code_repo.path / "c.php").write_text("x")
+    _git(code_repo.path, "add", "-A")
+    _git(code_repo.path, "commit", "-qm", "feat: 庫存頁面調整")
+    res = pipeline.sync_commits(bot.db, bot.llm, bot.s, code_repo, datetime(2026, 11, 23, 8, 0, tzinfo=TZ))
+    assert res.commits == 2
+    export = bot.db.one("SELECT * FROM issues WHERE title='匯出缺出貨日期'")
+    stock = bot.db.one("SELECT * FROM issues WHERE title='低庫存提醒'")
+    assert export["status"] == "resolved" and export["auto_resolved"] == 1
+    assert export["resolution_location"] == "訂單管理 → 匯出 Excel"
+    assert stock["status"] != "resolved" and any(f"/resolve {stock['id']}" in t for t in res.suggestions)
+    # 再跑一次不會重複處理
+    assert pipeline.sync_commits(bot.db, bot.llm, bot.s, code_repo).commits == 0
+    # 配錯可以 /reopen
+    post(client, text_ev(None, ADMIN, f"/reopen {export['id']}"))
+    assert bot.db.issue(export["id"])["status"] == "analyzed"

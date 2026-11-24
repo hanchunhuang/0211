@@ -7,22 +7,24 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .db import DB
-from .pipeline import KIND_ZH, STATUS_ZH, resolve_issue, send_announcements
+from .pipeline import KIND_ZH, STATUS_ZH, reopen_issue, resolve_issue, send_announcements
 
 HELP = """🛠 管理指令
 /today　立即整理目前收集到的回饋（產生日報）
 /issues　列出未完成問題
 /issue 編號　看問題細節與修改建議
 /start 編號　標記為修改中
-/resolve 編號 怎麼改的 | 在哪裡　標記完成
+/resolve 編號 怎麼改的 | 在哪裡　手動標記完成
+/sync　立即讀取新 commit 並自動配對已修正的問題
+/reopen 編號　取消完成（例如 commit 配錯）
 /wontfix 編號 原因　標記不處理
 /announce　立即產生修正公告草稿與成效評估
 /preview　看待發送的公告草稿
 /approve [草稿編號…]　發送公告（不填=全部）
 /skip 草稿編號　不發送該草稿
 /groups　列出群組
-/company 公司名　（在群組內輸入）設定此群組的公司名稱
-/company 群組代碼 公司名　（私訊）設定公司名稱
+/center 中心名稱　（在群組內輸入）設定此群組的中心名稱
+/center 群組代碼 中心名稱　（私訊）設定中心名稱
 /whoami　顯示你的 userId"""
 
 
@@ -33,6 +35,7 @@ class Ctx:
     now: Callable
     run_digest: Callable[[], str]          # 回傳給管理者的摘要
     run_announce: Callable[[], str]
+    run_sync: Callable[[], str] = lambda: "（未啟用）"
     group_id: str | None = None            # 指令下在哪個群組（私訊為 None）
 
 
@@ -51,6 +54,15 @@ def handle(ctx: Ctx, text: str) -> str:
 
     if cmd == "/announce":
         return ctx.run_announce()
+
+    if cmd == "/sync":
+        return ctx.run_sync()
+
+    if cmd == "/reopen":
+        iid = _int(rest)
+        if not iid or not reopen_issue(db, iid, ctx.now()):
+            return "找不到這個問題編號"
+        return f"#{iid} 已改回未完成"
 
     if cmd == "/issues":
         rows = db.open_issues()
@@ -78,8 +90,15 @@ def handle(ctx: Ctx, text: str) -> str:
             out += ["", f"原因：{a['root_cause']}", "建議修改："]
             out += [f"{n}. {s}" for n, s in enumerate(a["proposed_changes"], 1)]
             out.append(f"影響：{a['affected_area']}（工作量 {a['effort']}）")
+            if a.get("user_path"):
+                out.append(f"操作位置：{a['user_path']}")
+            if a.get("files_to_change"):
+                out.append("檔案：" + "、".join(f["path"] for f in a["files_to_change"]))
         if i["resolution_note"]:
             out += ["", f"處理：{i['resolution_note']}｜{i['resolution_location'] or ''}"]
+            commits = json.loads(i["fix_commits"] or "[]") if "fix_commits" in i.keys() else []
+            if commits:
+                out.append(f"commit：{', '.join(commits)}（{'自動配對' if i['auto_resolved'] else '手動'}）")
         return "\n".join(out)
 
     if cmd == "/start":
@@ -135,16 +154,16 @@ def handle(ctx: Ctx, text: str) -> str:
         return "\n".join(f"{'🟢' if g['active'] else '⚪'} {g['company'] or '-'}（{g['name'] or ''}）代碼 {g['id'][-8:]}"
                          for g in rows)
 
-    if cmd == "/company":
+    if cmd in ("/center", "/company"):
         if ctx.group_id and rest:
             db.set_group_company(ctx.group_id, rest)
-            return f"此群組公司名稱設為：{rest}"
+            return f"此群組的中心名稱設為：{rest}"
         code, _, name = rest.partition(" ")
         g = db.one("SELECT id FROM groups WHERE id LIKE ?", (f"%{code}",)) if code else None
         if not g or not name.strip():
-            return "格式：/company 群組代碼 公司名（代碼可用 /groups 查）"
+            return "格式：/center 群組代碼 中心名稱（代碼可用 /groups 查）"
         db.set_group_company(g["id"], name.strip())
-        return f"已設定 {code} 的公司名稱：{name.strip()}"
+        return f"已設定 {code} 的中心名稱：{name.strip()}"
 
     return "看不懂這個指令，輸入 /help 查看說明"
 

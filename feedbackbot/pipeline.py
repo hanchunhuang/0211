@@ -1,6 +1,7 @@
 """每日循環：
-1. digest()               每晚：萃取當天回饋 → 跨公司歸類（共同/單一）→ 分析修改方式 → 產生日報
-2. resolve_issue()        開發者改完後標記：怎麼改、改在哪裡
+1. digest()               每晚：萃取當天回饋 → 跨中心歸類（共同/單一）→ 查程式碼分析修改方式 → 產生日報
+2. sync_commits()         讀取系統程式庫的新 commit，自動配對到已回報的問題並標記完成
+   resolve_issue()        （或由管理者手動標記：怎麼改、改在哪裡）
 3. prepare_announcements() 隔天早上：成效評估報告 + 為每個群組產生「已修正」公告草稿
 4. send_announcements()   推播到群組（自動或經管理者 /approve）
 """
@@ -17,6 +18,7 @@ from zoneinfo import ZoneInfo
 from .config import Settings
 from .db import DB
 from .llm import LLM
+from .repo import CodeRepo
 
 log = logging.getLogger(__name__)
 RUN_LOCK = threading.Lock()
@@ -41,13 +43,15 @@ class DigestResult:
     admin_summary: str = ""
 
 
-def _transcript(db: DB, rows: list) -> tuple[str, list[tuple[int, Path]]]:
+def _transcript(db: DB, rows: list, staff_ids: list[str] | None = None) -> tuple[str, list[tuple[int, Path]]]:
     by_line_id = {r["line_message_id"]: r["id"] for r in rows if r["line_message_id"]}
     lines: list[str] = []
     images: list[tuple[int, Path]] = []
     for r in rows:
         t = datetime.fromisoformat(r["created_at"]).strftime("%m/%d %H:%M")
         name = r["display_name"] or "使用者"
+        if staff_ids and r["user_id"] in staff_ids:
+            name += "（客服）"
         quote = ""
         if r["quoted_message_id"]:
             q = by_line_id.get(r["quoted_message_id"])
@@ -64,7 +68,8 @@ def _transcript(db: DB, rows: list) -> tuple[str, list[tuple[int, Path]]]:
     return "\n".join(lines), images
 
 
-def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None) -> DigestResult:
+def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
+           repo: CodeRepo | None = None) -> DigestResult:
     now = now or now_in(settings)
     day = now.strftime("%Y-%m-%d")
     res = DigestResult(date=day)
@@ -72,7 +77,7 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None) ->
         # ---- 1. 每個群組各自萃取回饋 ----
         for group_id, rows in db.unprocessed_messages().items():
             company = db.group_label(group_id)
-            transcript, images = _transcript(db, rows)
+            transcript, images = _transcript(db, rows, settings.staff_user_ids)
             valid_ids = {r["id"] for r in rows}
             if any(r["kind"] in ("text", "image") for r in rows):
                 extraction = llm.extract(company, transcript, images[: settings.max_images_per_group])
@@ -127,7 +132,9 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None) ->
                     touched.add(issue_id)
 
         # ---- 3. 對今天有變動的問題做修改分析 ----
-        system_context = settings.system_context()
+        if touched and repo is not None and repo.exists() and settings.repo_auto_update:
+            _safe_update(repo)
+        system_context = settings.system_context(repo)
         for issue_id in sorted(touched):
             issue = db.issue(issue_id)
             if issue["status"] in ("resolved", "wontfix", "in_progress"):
@@ -136,7 +143,7 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None) ->
             analysis = llm.analyze(
                 {"id": issue_id, "title": issue["title"], "kind": issue["kind"], "summary": issue["summary"],
                  "module": issue["module"]},
-                feedback, system_context)
+                feedback, system_context, repo=repo)
             db.update_issue(issue_id, now, analysis=analysis.model_dump(), priority=analysis.priority,
                             status="analyzed")
         res.touched_issue_ids = sorted(touched)
@@ -165,7 +172,7 @@ def _issue_md(db: DB, issue_id: int, today: str) -> str:
     out = [f"### #{i['id']} {i['title']}",
            f"- 類型：{KIND_ZH.get(i['kind'], i['kind'])}　優先級：{i['priority'] or '-'}　狀態：{STATUS_ZH.get(i['status'], i['status'])}",
            f"- 模組：{i['module'] or '-'}",
-           f"- 回報公司：{'、'.join(companies)}",
+           f"- 回報中心：{'、'.join(companies)}",
            f"- 問題摘要：{i['summary']}",
            "- 使用者原話："]
     for f in db.issue_feedback(issue_id):
@@ -187,6 +194,13 @@ def _issue_md(db: DB, issue_id: int, today: str) -> str:
             out.append("  - 需向使用者確認：" + "；".join(a["questions_to_confirm"]))
         if a.get("acceptance_checks"):
             out.append("  - 驗收方式：" + "；".join(a["acceptance_checks"]))
+        if a.get("user_path"):
+            out.append(f"  - 使用者操作位置：{a['user_path']}")
+        if a.get("files_to_change"):
+            out.append("  - 建議修改的檔案：")
+            out += [f"    - `{f['path']}`：{f['change']}" for f in a["files_to_change"]]
+    if i["resolution_note"]:
+        out.append(f"- 處理：{i['resolution_note']}｜{i['resolution_location'] or ''}")
     return "\n".join(out)
 
 
@@ -201,26 +215,27 @@ def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: dat
         f"產生時間：{now.strftime('%Y-%m-%d %H:%M')}",
         "",
         f"- 今日新回饋：{res.new_feedback} 筆",
-        f"- 今日涉及問題：{len(res.touched_issue_ids)} 個（共同問題 {len(common)}、單一公司問題 {len(single)}）",
+        f"- 今日涉及問題：{len(res.touched_issue_ids)} 個（共同問題 {len(common)}、單一中心問題 {len(single)}）",
         f"- 目前未完成問題總數：{len(backlog)}",
         "",
-        "## 一、共同問題（2 家以上公司反映）",
+        "## 一、共同問題（2 家以上中心反映）",
         "",
         *([_issue_md(db, i, res.date) + "\n" for i in common] or ["（無）\n"]),
-        "## 二、單一公司問題",
+        "## 二、單一中心問題",
         "",
         *([_issue_md(db, i, res.date) + "\n" for i in single] or ["（無）\n"]),
         "## 三、待處理清單（全部未完成）",
         "",
-        "| # | 標題 | 類型 | 優先級 | 狀態 | 公司數 |",
+        "| # | 標題 | 類型 | 優先級 | 狀態 | 中心數 |",
         "|---|---|---|---|---|---|",
         *[f"| {i['id']} | {i['title']} | {KIND_ZH.get(i['kind'], i['kind'])} | {i['priority'] or '-'} | "
           f"{STATUS_ZH.get(i['status'], i['status'])} | {len(db.issue_groups(i['id']))} |" for i in backlog],
         "",
         "## 四、改完後怎麼標記",
         "",
-        "LINE 私訊機器人：`/resolve 編號 怎麼改的 | 在哪裡`，例如：",
-        "`/resolve 12 匯出檔加入出貨日期欄位 | 訂單管理 > 匯出 Excel`",
+        "- 照平常一樣 commit（`feat:`／`fix:` + 中文說明）並推到 master，隔天早上會自動配對到問題；",
+        "  commit 訊息裡寫 `#編號`（例如 `fix: … (#12)`）配對最準。",
+        "- 也可以 LINE 私訊機器人：`/resolve 編號 怎麼改的 | 在哪裡`",
         "",
     ]
     path = settings.reports_dir / f"{res.date}-digest.md"
@@ -250,12 +265,100 @@ def _admin_digest_summary(db: DB, res: DigestResult) -> str:
 
 
 def resolve_issue(db: DB, issue_id: int, note: str, location: str, now: datetime,
-                  status: str = "resolved") -> bool:
+                  status: str = "resolved", commits: list[str] | None = None, auto: bool = False) -> bool:
     if not db.issue(issue_id):
         return False
     db.update_issue(issue_id, now, status=status, resolution_note=note, resolution_location=location,
-                    resolved_at=now.isoformat())
+                    resolved_at=now.isoformat(), fix_commits=json.dumps(commits or []), auto_resolved=int(auto))
     return True
+
+
+def reopen_issue(db: DB, issue_id: int, now: datetime) -> bool:
+    i = db.issue(issue_id)
+    if not i:
+        return False
+    db.update_issue(issue_id, now, status="analyzed" if i["analysis"] else "open", resolution_note=None,
+                    resolution_location=None, resolved_at=None, fix_commits=None, auto_resolved=0)
+    return True
+
+
+# ====================================================================== commits
+
+
+@dataclass
+class SyncResult:
+    commits: int = 0
+    resolved: list[int] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
+    admin_summary: str = ""
+
+
+def _safe_update(repo: CodeRepo) -> None:
+    try:
+        repo.update()
+    except Exception:  # noqa: BLE001
+        log.exception("更新程式庫失敗，使用現有版本")
+
+
+_CONF_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def sync_commits(db: DB, llm: LLM, settings: Settings, repo: CodeRepo, now: datetime | None = None) -> SyncResult:
+    """讀取上次之後的新 commit，配對到未完成的問題。高信心自動標記完成；中信心列為建議。"""
+    now = now or now_in(settings)
+    res = SyncResult()
+    if repo is None or not repo.exists():
+        res.admin_summary = "（未設定 REPO_PATH，略過 commit 配對）"
+        return res
+    with RUN_LOCK:
+        if settings.repo_auto_update:
+            _safe_update(repo)
+        last = db.get_kv("last_commit")
+        commits = repo.commits_since(last)
+        res.commits = len(commits)
+        open_issues = db.open_issues()
+        if commits and open_issues:
+            issues_payload = [
+                {"id": i["id"], "title": i["title"], "kind": i["kind"], "summary": i["summary"], "module": i["module"],
+                 "user_path": (json.loads(i["analysis"]).get("user_path") if i["analysis"] else ""),
+                 "feedback": [f["detail"] for f in db.issue_feedback(i["id"])][:5]}
+                for i in open_issues
+            ]
+            matching = llm.match_commits(issues_payload, [c.as_dict() for c in commits],
+                                         settings.system_context(repo), repo=repo)
+            valid = {i["id"] for i in open_issues}
+            threshold = _CONF_RANK.get(settings.commit_match_min_confidence, 2)
+            for m in matching.matches:
+                if m.issue_id not in valid:
+                    continue
+                if _CONF_RANK[m.confidence] >= threshold:
+                    resolve_issue(db, m.issue_id, m.how_fixed, m.where, now, commits=m.commit_hashes, auto=True)
+                    res.resolved.append(m.issue_id)
+                elif m.confidence == "medium":
+                    res.suggestions.append(
+                        f"#{m.issue_id} 可能已由 {', '.join(m.commit_hashes)} 處理：{m.reason}\n"
+                        f"確認的話回：/resolve {m.issue_id} {m.how_fixed} | {m.where}")
+        if commits:
+            db.set_kv("last_commit", commits[-1].hash)
+        elif last is None:
+            db.set_kv("last_commit", repo.head())
+        res.admin_summary = _admin_sync_summary(db, res)
+        return res
+
+
+def _admin_sync_summary(db: DB, res: SyncResult) -> str:
+    lines = [f"🔧 新 commit {res.commits} 個"]
+    if res.resolved:
+        lines.append("自動標記完成：")
+        for i in res.resolved:
+            iss = db.issue(i)
+            lines.append(f"✅ #{i} {iss['title']}\n　改了：{iss['resolution_note']}\n　位置：{iss['resolution_location']}")
+        lines.append("配錯的話回 /reopen 編號（公告送出前都可以改）")
+    if res.suggestions:
+        lines += ["", "🤔 可能相關、需要你確認："] + res.suggestions
+    if not res.resolved and not res.suggestions:
+        lines.append("沒有配對到已回報的問題。")
+    return "\n".join(lines)
 
 
 # ====================================================================== announce
@@ -283,7 +386,8 @@ def prepare_announcements(db: DB, llm: LLM, settings: Settings, now: datetime | 
                 {"issue_id": i["id"], "title": i["title"], "status": i["status"], "summary": i["summary"],
                  "companies": [db.group_label(g) for g in db.issue_groups(i["id"])],
                  "feedback": _feedback_payload(db, i["id"]),
-                 "resolution_note": i["resolution_note"], "resolution_location": i["resolution_location"]}
+                 "resolution_note": i["resolution_note"], "resolution_location": i["resolution_location"],
+                 "fix_commits": json.loads(i["fix_commits"] or "[]"), "auto_matched": bool(i["auto_resolved"])}
                 for i in newly
             ]
             report = llm.evaluate(payload)
@@ -321,7 +425,7 @@ def _write_evaluation(db: DB, settings: Settings, day: str, issues: list, report
     lines = [f"# 修正成效評估 {day}", "", f"產生時間：{now.strftime('%Y-%m-%d %H:%M')}", "",
              "## 總評", "", report.overview, "",
              "## 各問題", "",
-             "| # | 問題 | 狀態 | 公司 | 怎麼改 | 改在哪 | 評估 |", "|---|---|---|---|---|---|---|"]
+             "| # | 問題 | 狀態 | 中心 | 怎麼改 | 改在哪 | 評估 |", "|---|---|---|---|---|---|---|"]
     for i in issues:
         e = ev.get(i["id"])
         cos = "、".join(db.group_label(g) for g in db.issue_groups(i["id"]))

@@ -33,6 +33,24 @@ class Settings:
         default_factory=lambda: Path(os.getenv("SYSTEM_CONTEXT_FILE", "./system_context.md"))
     )
     max_images_per_group: int = field(default_factory=lambda: int(os.getenv("MAX_IMAGES_PER_GROUP", "20")))
+    # 客服人員（例如在群組回答問題的同事）的 LINE userId，逐字稿會標註「客服」
+    staff_user_ids: list[str] = field(
+        default_factory=lambda: [x.strip() for x in os.getenv("STAFF_USER_IDS", "").split(",") if x.strip()]
+    )
+    # ---- 被回饋的系統程式碼（唯讀 git clone）----
+    repo_path: str = field(default_factory=lambda: os.getenv("REPO_PATH", ""))
+    repo_branch: str = field(default_factory=lambda: os.getenv("REPO_BRANCH", "master"))
+    repo_auto_update: bool = field(default_factory=lambda: _bool(os.getenv("REPO_AUTO_UPDATE"), True))
+    repo_context_docs: list[str] = field(default_factory=lambda: [
+        x.strip() for x in os.getenv("REPO_CONTEXT_DOCS", "CLAUDE.md,docs/handover/AI_ONBOARDING.md").split(",")
+        if x.strip()])
+    repo_knowledge_file: str = field(default_factory=lambda: os.getenv(
+        "REPO_KNOWLEDGE_FILE", "database/seeders/support_bot_knowledge.json"))
+    # commit 配對信心門檻：AI 判斷 high 才自動標記完成
+    commit_match_min_confidence: str = field(default_factory=lambda: os.getenv("COMMIT_MATCH_MIN_CONFIDENCE", "high"))
+    # ---- Telegram 通知（選填，省 LINE 推播額度）----
+    telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
+    telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
 
     @property
     def db_path(self) -> Path:
@@ -42,10 +60,16 @@ class Settings:
     def images_dir(self) -> Path:
         return self.data_dir / "images"
 
-    def system_context(self) -> str:
+    def system_context(self, repo=None) -> str:
+        """給 AI 的系統背景：自訂說明檔 + 程式庫內的交接文件（CLAUDE.md 等）。"""
+        parts = []
         if self.system_context_file.exists():
-            return self.system_context_file.read_text(encoding="utf-8")
-        return "（未提供系統說明）"
+            parts.append(self.system_context_file.read_text(encoding="utf-8"))
+        if repo is not None and repo.exists():
+            docs = repo.read_docs(self.repo_context_docs)
+            if docs:
+                parts.append(docs)
+        return "\n\n".join(parts) or "（未提供系統說明）"
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

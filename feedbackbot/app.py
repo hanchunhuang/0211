@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import threading
+
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -20,18 +22,21 @@ from .config import Settings
 from .db import DB
 from .line_api import LineClient, verify_signature
 from .llm import ClaudeLLM
+from .repo import CodeRepo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("feedbackbot")
 
 
 class Bot:
-    def __init__(self, settings: Settings | None = None, db: DB | None = None, line=None, llm=None):
+    def __init__(self, settings: Settings | None = None, db: DB | None = None, line=None, llm=None, repo=None):
         self.s = settings or Settings()
         self.s.ensure_dirs()
         self.db = db or DB(self.s.db_path)
         self.line = line or LineClient(self.s.line_access_token)
-        self.llm = llm or ClaudeLLM(self.s.claude_model)
+        self.llm = llm or ClaudeLLM(self.s.claude_model, knowledge_file=self.s.repo_knowledge_file)
+        self.repo = repo if repo is not None else (
+            CodeRepo(self.s.repo_path, self.s.repo_branch) if self.s.repo_path else None)
         self.tz = ZoneInfo(self.s.timezone)
         self._names: dict[tuple[str, str], str] = {}
 
@@ -40,6 +45,16 @@ class Bot:
 
     # ---------------- 通知管理者 ----------------
     def notify_admins(self, text: str) -> None:
+        """通知管理者：有設定 Telegram 就走 Telegram（不耗 LINE 推播額度），否則 LINE 私訊。"""
+        if self.s.telegram_bot_token and self.s.telegram_chat_id:
+            try:
+                for i in range(0, len(text), 4000):
+                    httpx.post(f"https://api.telegram.org/bot{self.s.telegram_bot_token}/sendMessage",
+                               json={"chat_id": self.s.telegram_chat_id, "text": text[i:i + 4000]},
+                               timeout=15).raise_for_status()
+                return
+            except Exception:  # noqa: BLE001
+                log.exception("telegram notify failed, fallback to LINE")
         for uid in self.s.admin_user_ids:
             try:
                 self.line.push(uid, text)
@@ -49,7 +64,7 @@ class Bot:
     # ---------------- 排程工作 ----------------
     def job_digest(self) -> str:
         try:
-            res = pipeline.digest(self.db, self.llm, self.s, self.now())
+            res = pipeline.digest(self.db, self.llm, self.s, self.now(), repo=self.repo)
             msg = res.admin_summary + (f"\n\n完整日報：{res.report_path}" if res.report_path else "")
         except Exception as e:  # noqa: BLE001
             log.exception("digest failed")
@@ -57,10 +72,21 @@ class Bot:
         self.notify_admins(msg)
         return msg
 
+    def job_sync(self, notify: bool = True) -> str:
+        try:
+            msg = pipeline.sync_commits(self.db, self.llm, self.s, self.repo, self.now()).admin_summary
+        except Exception as e:  # noqa: BLE001
+            log.exception("sync commits failed")
+            msg = f"⚠️ 讀取 commit 失敗：{e}"
+        if notify:
+            self.notify_admins(msg)
+        return msg
+
     def job_announce(self) -> str:
+        sync_msg = self.job_sync(notify=False) if self.repo is not None else ""
         try:
             res = pipeline.prepare_announcements(self.db, self.llm, self.s, self.now())
-            msg = res.admin_summary
+            msg = (sync_msg + "\n\n" if sync_msg else "") + res.admin_summary
             if res.evaluation_path:
                 msg += f"\n\n成效評估報告：{res.evaluation_path}"
             if self.s.auto_push and res.draft_ids:
@@ -82,7 +108,7 @@ class Bot:
         if etype == "join" and chat_id:
             name = self.line.group_name(chat_id) if src.get("groupId") else None
             self.db.upsert_group(chat_id, ts, name)
-            self.notify_admins(f"🤖 已加入群組「{name or chat_id}」。可在該群組輸入 /company 公司名 設定公司名稱。")
+            self.notify_admins(f"🤖 回饋收集機器人已加入群組「{name or chat_id}」。請在該群組輸入 /center 中心名稱 設定對應的中心。")
             return
         if etype == "leave" and chat_id:
             self.db.deactivate_group(chat_id)
@@ -148,8 +174,8 @@ class Bot:
     def _run_command(self, text: str, reply_token: str, user_id: str, group_id: str | None) -> None:
         cmd = text.split()[0].lower()
         ctx = commands.Ctx(db=self.db, line=self.line, now=self.now, group_id=group_id,
-                           run_digest=self.job_digest, run_announce=self.job_announce)
-        if cmd in ("/today", "/announce"):
+                           run_digest=self.job_digest, run_announce=self.job_announce, run_sync=self.job_sync)
+        if cmd in ("/today", "/announce", "/sync"):
             # 需要呼叫 AI，時間較長：先回覆，再在背景執行，完成後推播給管理者
             self.line.reply(reply_token, "⏳ 處理中，完成後會私訊通知你…")
             threading.Thread(target=commands.handle, args=(ctx, text), daemon=True).start()
