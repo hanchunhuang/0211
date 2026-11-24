@@ -260,3 +260,58 @@ def test_commit_sync_resolves_issues(env, code_repo):
     # 配錯可以 /reopen
     post(client, text_ev(None, ADMIN, f"/reopen {export['id']}"))
     assert bot.db.issue(export["id"])["status"] == "analyzed"
+
+
+def test_admin_web(env):
+    bot, line, client = env
+    ts = int(datetime(2026, 11, 21, 9, 0, tzinfo=TZ).timestamp() * 1000)
+    post(client, {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GA}},
+         {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GB}})
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期 <script>alert(1)</script>"),
+         text_ev(GB, "U2", "匯出少了出貨日"), text_ev(GA, "U3", "希望有庫存提醒"))
+    pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
+
+    # 沒設密碼 → 後台關閉；設了密碼 → 需要登入
+    assert client.get("/admin", auth=("admin", "x")).status_code == 503
+    bot.s.admin_web_password = "pw"
+    assert client.get("/admin").status_code == 401
+    assert client.get("/admin", auth=("admin", "wrong")).status_code == 401
+    auth = ("admin", "pw")
+
+    r = client.get("/admin", auth=auth)
+    assert r.status_code == 200 and "甲公司-系統群" in r.text and "每日新回饋" in r.text
+    r = client.get(f"/admin?group={GA}&days=30", auth=auth)
+    assert r.status_code == 200
+
+    r = client.get(f"/admin/groups/{GA}", auth=auth)
+    assert r.status_code == 200 and "匯出缺出貨日期" in r.text and "共同（2 家）" in r.text
+    assert "<script>alert(1)</script>" not in r.text and "&lt;script&gt;" in r.text  # 群組訊息會被跳脫
+
+    r = client.get("/admin/issues?scope=common", auth=auth)
+    assert "匯出缺出貨日期" in r.text and "低庫存提醒" not in r.text
+    iid = bot.db.one("SELECT id FROM issues WHERE title='匯出缺出貨日期'")["id"]
+    r = client.get(f"/admin/issues/{iid}", auth=auth)
+    assert r.status_code == 200 and "乙公司-系統群" in r.text and "訂單管理 → 匯出" in r.text
+
+    r = client.get("/admin/messages?q=庫存", auth=auth)
+    assert "希望有庫存提醒" in r.text and "訂單匯出" not in r.text
+
+    # 跨站表單會被擋；同源才可以
+    assert client.post(f"/admin/issues/{iid}/resolve", data={"note": "x"}, auth=auth).status_code == 403
+    r = client.post(f"/admin/issues/{iid}/resolve", data={"note": "匯出加上出貨日期", "location": "訂單管理 → 匯出"},
+                    auth=auth, headers={"origin": "http://testserver"}, follow_redirects=False)
+    assert r.status_code == 303 and bot.db.issue(iid)["status"] == "resolved"
+
+    # 公告：從網頁發送
+    pipeline.prepare_announcements(bot.db, bot.llm, bot.s, datetime(2026, 11, 22, 9, 0, tzinfo=TZ))
+    r = client.get("/admin/announcements", auth=auth)
+    assert "發送到群組" in r.text
+    aid = bot.db.drafts()[0]["id"]
+    client.post(f"/admin/announcements/{aid}/approve", auth=auth, headers={"origin": "http://testserver"})
+    assert any(to in (GA, GB) for to, _ in line.pushes)
+    r = client.get("/admin/reports", auth=auth)
+    assert "日報" in r.text
+    name = r.text.split("?name=")[1].split('"')[0]
+    assert client.get(f"/admin/reports?name={name}", auth=auth).status_code == 200
+    assert client.get("/admin/reports?name=../../etc/passwd", auth=auth).status_code == 404
+    assert client.get("/admin/images/1", auth=auth).status_code == 404

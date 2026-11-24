@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}原始訊息｜回饋後台{% endblock %}
+{% block body %}
+<h1>原始訊息</h1>
+<form class="filters" method="get">
+  <select name="group" aria-label="群組"><option value="">全部群組</option>
+    {% for g in groups %}<option value="{{ g.id }}" {{ 'selected' if g.id == group }}>{{ label(g.id) }}</option>{% endfor %}</select>
+  <input type="search" name="q" value="{{ q }}" placeholder="搜尋內容或發言者">
+  <button>搜尋</button><span class="sub">共 {{ total }} 則</span>
+</form>
+<div class="card scroll">
+  {% if msgs %}<table>
+    <tr><th>時間</th><th>群組</th><th>發言者</th><th>內容</th><th></th></tr>
+    {% for m in msgs %}{% with show_group=True %}{% include "_msgrow.html" %}{% endwith %}{% endfor %}
+  </table>
+  <div class="pager">{% if page > 1 %}<a href="?group={{ group }}&q={{ q | urlencode }}&page={{ page - 1 }}">← 較新</a>{% endif %}<span class="sub">第 {{ page }}／{{ pages }} 頁</span>{% if page < pages %}<a href="?group={{ group }}&q={{ q | urlencode }}&page={{ page + 1 }}">較舊 →</a>{% endif %}</div>
+  {% else %}<div class="empty">沒有符合的訊息。</div>{% endif %}
+</div>
+{% endblock %}

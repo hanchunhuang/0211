@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}報告｜回饋後台{% endblock %}
+{% block body %}
+<h1>報告</h1>
+<div class="grid2" style="grid-template-columns: 1fr 3fr">
+  <div class="card">
+    {% for f in files %}<div><a href="?name={{ f | urlencode }}" {% if f == name %}style="font-weight:700"{% endif %}>{{ f.replace('-digest.md', ' 日報').replace('-evaluation.md', ' 成效評估') }}</a></div>
+    {% else %}<div class="empty">還沒有報告。</div>{% endfor %}
+  </div>
+  <div class="card">{% if content %}<pre class="report">{{ content }}</pre>{% else %}<div class="empty">選一份報告查看。</div>{% endif %}</div>
+</div>
+{% endblock %}

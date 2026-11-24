@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}公告｜回饋後台{% endblock %}
+{% block body %}
+<h1>公告</h1>
+{% set zh = {'draft': '草稿', 'sent': '已發送', 'skipped': '略過', 'failed': '發送失敗'} %}
+{% for a in rows %}
+<div class="card" style="margin-bottom:12px">
+  <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+    <div><strong>{{ label(a.group_id) }}</strong> <span class="pill {{ a.status }}">{{ zh.get(a.status, a.status) }}</span>
+      <span class="sub">草稿 #{{ a.id }}｜{{ a.for_date }}｜問題 {% for x in a.issue_ids | fromjson %}<a href="/admin/issues/{{ x }}">#{{ x }}</a> {% endfor %}{% if a.sent_at %}｜發送 {{ a.sent_at | t }}{% endif %}</span></div>
+    {% if a.status in ('draft', 'failed') %}
+    <div style="display:flex;gap:6px">
+      <form method="post" action="/admin/announcements/{{ a.id }}/approve" onsubmit="return confirm('確定推播到「{{ label(a.group_id) }}」群組？')"><button class="primary">發送到群組</button></form>
+      <form method="post" action="/admin/announcements/{{ a.id }}/skip"><button>略過</button></form>
+    </div>{% endif %}
+  </div>
+  <div class="msg" style="margin-top:8px">{{ a.text }}</div>
+  {% if a.error %}<div class="sub" style="color:var(--bad)">{{ a.error }}</div>{% endif %}
+</div>
+{% else %}<div class="card empty">還沒有公告。</div>{% endfor %}
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}#{{ i.id }} {{ i.title }}｜回饋後台{% endblock %}
+{% block body %}
+<p class="sub"><a href="/admin/issues">問題</a> ／ #{{ i.id }}</p>
+<h1>#{{ i.id }} {{ i.title }}</h1>
+<p><span class="pill {{ i.status }}">{{ STATUS_ZH.get(i.status) }}</span>
+  <span class="pill {{ i.priority }}">{{ i.priority or '-' }}</span>
+  <span class="pill">{{ KIND_ZH.get(i.kind, i.kind) }}</span>
+  {% if by_group | length >= 2 %}<span class="pill common">共同問題：{{ by_group | length }} 家中心</span>{% else %}<span class="pill">單一中心</span>{% endif %}
+  <span class="sub">模組：{{ i.module or '-' }}　建立 {{ i.created_at | t }}</span></p>
+<div class="grid2">
+  <div>
+    <div class="card"><strong>問題摘要</strong><div class="msg">{{ i.summary }}</div></div>
+
+    <h2>各中心的回饋</h2>
+    {% for gid, items in by_group.items() %}
+    <div class="card" style="margin-bottom:10px">
+      <strong><a href="/admin/groups/{{ gid }}">{{ label(gid) }}</a></strong> <span class="sub">{{ items | length }} 筆</span>
+      {% set recent = items | reverse | list %}
+      {% for f in recent[:3] %}<div class="quote" style="margin-top:8px"><span class="sub">{{ f.digest_date }}　{{ f.reporter or '' }}</span><div class="msg">{{ f.detail }}</div></div>{% endfor %}
+      {% if recent | length > 3 %}<details style="margin-top:8px"><summary class="sub">顯示其餘 {{ recent | length - 3 }} 筆</summary>
+        {% for f in recent[3:] %}<div class="quote" style="margin-top:8px"><span class="sub">{{ f.digest_date }}　{{ f.reporter or '' }}</span><div class="msg">{{ f.detail }}</div></div>{% endfor %}
+      </details>{% endif %}
+    </div>
+    {% endfor %}
+
+    {% if analysis %}
+    <h2>AI 分析</h2>
+    <div class="card">
+      <p><strong>理解：</strong>{{ analysis.understanding }}</p>
+      <p><strong>可能原因：</strong>{{ analysis.root_cause }}</p>
+      <p><strong>建議修改：</strong></p><ol>{% for s in analysis.proposed_changes %}<li>{{ s }}</li>{% endfor %}</ol>
+      {% if analysis.files_to_change %}<p><strong>建議修改的檔案：</strong></p>
+        <ul>{% for f in analysis.files_to_change %}<li><code>{{ f.path }}</code>：{{ f.change }}</li>{% endfor %}</ul>{% endif %}
+      <p><strong>影響範圍：</strong>{{ analysis.affected_area }}　<strong>工作量：</strong>{{ analysis.effort }}</p>
+      {% if analysis.user_path %}<p><strong>使用者操作位置：</strong>{{ analysis.user_path }}</p>{% endif %}
+      {% if analysis.risks %}<p><strong>風險：</strong>{{ analysis.risks | join('；') }}</p>{% endif %}
+      {% if analysis.questions_to_confirm %}<p><strong>需向使用者確認：</strong>{{ analysis.questions_to_confirm | join('；') }}</p>{% endif %}
+      {% if analysis.acceptance_checks %}<p><strong>驗收方式：</strong>{{ analysis.acceptance_checks | join('；') }}</p>{% endif %}
+    </div>
+    {% endif %}
+
+    <h2>原始訊息</h2>
+    <details class="card" {{ 'open' if source | length <= 10 }}><summary class="sub">共 {{ source | length }} 則</summary><div class="scroll">{% if source %}<table>
+      {% for m in source %}<tr><td class="sub" style="white-space:nowrap">{{ m.created_at | t }}</td><td>{{ label(m.group_id) }}</td><td style="white-space:nowrap">{{ m.display_name or '' }}</td>
+        <td class="msg">{% if m.kind == 'image' and m.image_path %}<a href="/admin/images/{{ m.id }}" target="_blank">🖼 截圖</a>{% else %}{{ m.text or '' }}{% endif %}</td></tr>{% endfor %}
+    </table>{% else %}<div class="empty">沒有對應的原始訊息。</div>{% endif %}</div></details>
+  </div>
+
+  <div>
+    <div class="card">
+      <strong>處理</strong>
+      {% if i.status in ('resolved', 'wontfix') %}
+        <p class="msg">{{ i.resolution_note or '' }}</p>
+        {% if i.resolution_location %}<p class="sub">位置：{{ i.resolution_location }}</p>{% endif %}
+        {% if commits %}<p class="sub">commit：{{ commits | join(', ') }}（{{ '自動配對' if i.auto_resolved else '手動' }}）</p>{% endif %}
+        <p class="sub">{{ i.resolved_at | t }}</p>
+        <form method="post" action="/admin/issues/{{ i.id }}/status"><input type="hidden" name="action" value="reopen"><button>改回未完成</button></form>
+      {% else %}
+        <form method="post" action="/admin/issues/{{ i.id }}/resolve" style="margin-top:8px">
+          <label class="sub" for="note">怎麼改的（會出現在公告）</label>
+          <textarea id="note" name="note" required></textarea>
+          <label class="sub" for="loc">在哪裡</label>
+          <input id="loc" type="text" name="location" style="width:100%" value="{{ analysis.user_path if analysis else '' }}">
+          <p><button class="primary">標記完成</button></p>
+        </form>
+        <form method="post" action="/admin/issues/{{ i.id }}/status" style="display:flex;gap:6px;flex-wrap:wrap">
+          {% if i.status != 'in_progress' %}<button name="action" value="start">標記修改中</button>{% endif %}
+          <input type="text" name="note" placeholder="不處理的原因" aria-label="不處理的原因">
+          <button name="action" value="wontfix">不處理</button>
+        </form>
+      {% endif %}
+    </div>
+    <div class="card" style="margin-top:12px">
+      <strong>公告紀錄</strong>
+      {% for a in anns %}<div style="margin-top:8px"><span class="pill {{ a.status }}">{{ a.status }}</span> <span class="sub">{{ label(a.group_id) }}　{{ a.for_date }}</span></div>
+      {% else %}<div class="empty">尚未公告。</div>{% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

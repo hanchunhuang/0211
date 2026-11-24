@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ label }}｜回饋後台{% endblock %}
+{% block body %}
+<p class="sub"><a href="/admin">總覽</a> ／ 群組</p>
+<h1>{{ label }}</h1>
+<div class="grid2">
+  <div class="tiles">
+    <div class="card tile"><div class="v">{{ stats.msgs }}</div><div class="k">收集訊息（近 7 天 {{ stats.msgs7 }}）</div></div>
+    <div class="card tile"><div class="v">{{ stats.fb }}</div><div class="k">回饋</div></div>
+    <div class="card tile"><div class="v">{{ stats.open_issues }}</div><div class="k">未完成問題</div></div>
+    <div class="card tile"><div class="v">{{ stats.resolved }}</div><div class="k">已修正</div></div>
+  </div>
+  <div class="card">
+    <div class="sub">LINE 群組：{{ g.name or '（未取得名稱）' }}<br>加入時間：{{ g.joined_at | t }}<br>群組代碼：{{ g.id[-8:] }}</div>
+    <form method="post" action="/admin/groups/{{ g.id }}/center" style="margin-top:10px;display:flex;gap:6px">
+      <input type="text" name="center" value="{{ g.company or '' }}" placeholder="中心名稱" aria-label="中心名稱" required>
+      <button>更新</button>
+    </form>
+  </div>
+</div>
+
+<h2>這個群組反映的問題</h2>
+<div class="card scroll">
+  {% if issues %}<table>
+    <tr><th>#</th><th>問題</th><th>類型</th><th>優先級</th><th>狀態</th><th>範圍</th><th class="n">本群回饋</th></tr>
+    {% for i in issues %}{% set ng = shared(i.id) %}
+    <tr><td>{{ i.id }}</td><td class="title-col"><a href="/admin/issues/{{ i.id }}">{{ i.title }}</a></td>
+      <td>{{ KIND_ZH.get(i.kind, i.kind) }}</td><td><span class="pill {{ i.priority }}">{{ i.priority or '-' }}</span></td>
+      <td><span class="pill {{ i.status }}">{{ STATUS_ZH.get(i.status) }}</span></td>
+      <td>{% if ng >= 2 %}<span class="pill common">共同（{{ ng }} 家）</span>{% else %}<span class="pill">單一</span>{% endif %}</td>
+      <td class="n">{{ i.n }}</td></tr>
+    {% endfor %}
+  </table>{% else %}<div class="empty">目前沒有整理出的問題。</div>{% endif %}
+</div>
+
+<h2>回饋（最近 100 筆）</h2>
+<div class="card scroll">
+  {% if feedback %}<table>
+    <tr><th>日期</th><th>提出者</th><th>類型</th><th>內容</th><th>問題</th></tr>
+    {% for f in feedback %}<tr><td class="sub" style="white-space:nowrap">{{ f.digest_date }}</td><td style="white-space:nowrap">{{ f.reporter or '' }}</td>
+      <td>{{ KIND_ZH.get(f.kind, f.kind) }}</td><td><strong>{{ f.title }}</strong><div class="msg sub">{{ f.detail }}</div></td>
+      <td>{% if f.issue_id %}<a href="/admin/issues/{{ f.issue_id }}">#{{ f.issue_id }}</a>{% endif %}</td></tr>{% endfor %}
+  </table>{% else %}<div class="empty">還沒有回饋。</div>{% endif %}
+</div>
+
+<h2>原始訊息</h2>
+<div class="card scroll">
+  {% if msgs %}<table>
+    <tr><th>時間</th><th>發言者</th><th>內容</th><th></th></tr>
+    {% for m in msgs %}{% with show_group=False %}{% include "_msgrow.html" %}{% endwith %}{% endfor %}
+  </table>
+  <div class="pager">{% if page > 1 %}<a href="?page={{ page - 1 }}">← 較新</a>{% endif %}<span class="sub">第 {{ page }}／{{ pages }} 頁</span>{% if page < pages %}<a href="?page={{ page + 1 }}">較舊 →</a>{% endif %}</div>
+  {% else %}<div class="empty">還沒有收集到訊息。</div>{% endif %}
+</div>
+{% endblock %}

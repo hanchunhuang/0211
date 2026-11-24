@@ -18,6 +18,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from . import commands, pipeline
+from .admin import build_router
 from .config import Settings
 from .db import DB
 from .line_api import LineClient, verify_signature
@@ -212,7 +213,8 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
         if sched:
             sched.shutdown(wait=False)
 
-    api = FastAPI(title="LINE Feedback Bot", lifespan=lifespan)
+    api = FastAPI(title="LINE Feedback Bot", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    api.include_router(build_router(get_bot))
 
     @api.get("/healthz")
     def healthz() -> dict:

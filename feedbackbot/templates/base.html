@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}回饋後台{% endblock %}</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f6f4; --surface: #fcfcfb; --border: #e4e3de; --grid: #ecebe7;
+  --text: #0b0b0b; --text-2: #52514e; --text-3: #7a7974;
+  --accent: #2a78d6; --accent-soft: #e6effa;
+  --series-1: #2a78d6;
+  --good: #0a7a33; --good-soft: #e3f3e8; --warn: #9a6200; --warn-soft: #fbf0d9;
+  --bad: #b42323; --bad-soft: #fbe5e5; --muted-soft: #efeeea;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --border: #2e2e2c; --grid: #262624;
+    --text: #f0efec; --text-2: #c3c2b7; --text-3: #94938b;
+    --accent: #5b9bea; --accent-soft: #1d2a3b; --series-1: #3987e5;
+    --good: #4cc27a; --good-soft: #17291e; --warn: #e3a634; --warn-soft: #2e2513;
+    --bad: #f07070; --bad-soft: #331a1a; --muted-soft: #252523;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --border: #2e2e2c; --grid: #262624;
+  --text: #f0efec; --text-2: #c3c2b7; --text-3: #94938b;
+  --accent: #5b9bea; --accent-soft: #1d2a3b; --series-1: #3987e5;
+  --good: #4cc27a; --good-soft: #17291e; --warn: #e3a634; --warn-soft: #2e2513;
+  --bad: #f07070; --bad-soft: #331a1a; --muted-soft: #252523;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif; }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+header { background: var(--surface); border-bottom: 1px solid var(--border); }
+.bar { max-width: 1200px; margin: 0 auto; padding: 0 16px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.brand { font-weight: 700; padding: 12px 0; }
+nav { display: flex; gap: 4px; flex-wrap: wrap; }
+nav a { color: var(--text-2); padding: 12px 10px; border-bottom: 2px solid transparent; }
+nav a.on { color: var(--text); border-bottom-color: var(--accent); }
+nav a:hover { text-decoration: none; color: var(--text); }
+main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+h1 { font-size: 22px; margin: 4px 0 16px; } h2 { font-size: 17px; margin: 28px 0 10px; }
+.sub { color: var(--text-2); font-size: 13px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.tile .v { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile .k { color: var(--text-2); font-size: 13px; }
+.scroll { overflow-x: auto; }
+.scroll > table { min-width: 680px; }
+.nowrap { white-space: nowrap; } .title-col { min-width: 12em; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--text-2); font-weight: 600; font-size: 13px; white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--muted-soft); color: var(--text-2); white-space: nowrap; }
+.pill.common { background: var(--accent-soft); color: var(--accent); }
+.pill.resolved { background: var(--good-soft); color: var(--good); }
+.pill.in_progress, .pill.draft { background: var(--warn-soft); color: var(--warn); }
+.pill.failed { background: var(--bad-soft); color: var(--bad); }
+.pill.P0 { background: var(--bad-soft); color: var(--bad); }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+select, input[type=text], input[type=search], textarea { font: inherit; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; max-width: 100%; }
+textarea { width: 100%; min-height: 70px; }
+button { font: inherit; border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.seg a { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-2); }
+.seg a.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+@media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+.msg { white-space: pre-wrap; word-break: break-word; }
+.quote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--text-2); }
+pre.report { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace; }
+.empty { color: var(--text-3); padding: 12px 0; }
+.pager { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <div class="brand">系統回饋後台</div>
+  <nav>
+    <a href="/admin" class="{{ 'on' if nav == 'overview' }}">總覽</a>
+    <a href="/admin/issues" class="{{ 'on' if nav in ('issues','issue') }}">問題</a>
+    <a href="/admin/messages" class="{{ 'on' if nav == 'messages' }}">原始訊息</a>
+    <a href="/admin/announcements" class="{{ 'on' if nav == 'announcements' }}">公告</a>
+    <a href="/admin/reports" class="{{ 'on' if nav == 'reports' }}">報告</a>
+  </nav>
+</div></header>
+<main>{% block body %}{% endblock %}</main>
+</body>
+</html>

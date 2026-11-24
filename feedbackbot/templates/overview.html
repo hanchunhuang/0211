@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}總覽｜回饋後台{% endblock %}
+{% block body %}
+<h1>總覽{% if group %}：{{ group_label }}{% endif %}</h1>
+<div class="filters">
+  <form method="get" action="/admin">
+    <select name="group" onchange="this.form.submit()" aria-label="群組">
+      <option value="">全部群組</option>
+      {% for g in groups %}<option value="{{ g.id }}" {{ 'selected' if g.id == group }}>{{ g.label }}</option>{% endfor %}
+    </select>
+    <input type="hidden" name="days" value="{{ days }}">
+  </form>
+  <span class="seg">{% for d in (7, 14, 30, 90) %}<a href="?group={{ group }}&days={{ d }}" class="{{ 'on' if d == days }}">{{ d }} 天</a> {% endfor %}</span>
+</div>
+
+<div class="tiles">
+  <div class="card tile"><div class="v">{{ tiles.fb7 }}</div><div class="k">近 7 天新回饋</div></div>
+  <div class="card tile"><div class="v">{{ tiles.open }}</div><div class="k">未完成問題（共同 {{ tiles.common }}／單一 {{ tiles.single }}）</div></div>
+  <div class="card tile"><div class="v">{{ tiles.unannounced }}</div><div class="k">已修正、尚未公告</div></div>
+  <div class="card tile"><div class="v">{{ tiles.msgs7 }}</div><div class="k">近 7 天收集訊息（待整理 {{ tiles.pending_msgs }}）</div></div>
+  {% if not group %}<div class="card tile"><div class="v">{{ tiles.groups }}</div><div class="k">啟用中群組</div></div>{% endif %}
+</div>
+
+<div class="grid2" style="margin-top:16px">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+      <strong>每日新回饋（筆）</strong><span class="sub">依整理日期；滑過長條看當天訊息數</span>
+    </div>
+    {% set mx = (series | map(attribute='n') | max) or 1 %}
+    <div class="chart" role="img" aria-label="近 {{ days }} 天每日新回饋筆數">
+      <div class="ymax">{{ mx }}</div>
+      <div class="cols">
+        {% for p in series %}
+        <div class="col" tabindex="0" data-tip="{{ p.label }}：回饋 {{ p.n }} 筆、訊息 {{ p.msgs }} 則">
+          <div class="b" style="height: {{ (p.n / mx * 100) | round(1) }}%"></div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="xl">
+        {% for p in series %}{% set major = loop.first or loop.index0 % 7 == 0 %}<span class="{{ '' if major else 'minor' }}">{% if major or (days <= 14 and loop.index0 % 2 == 0) %}{{ p.label }}{% endif %}</span>{% endfor %}
+      </div>
+      <div class="tip" hidden></div>
+    </div>
+    <details style="margin-top:8px"><summary class="sub">表格檢視</summary>
+      <div class="scroll"><table><tr><th>日期</th><th class="n">回饋</th><th class="n">訊息</th></tr>
+      {% for p in series %}<tr><td>{{ p.date }}</td><td class="n">{{ p.n }}</td><td class="n">{{ p.msgs }}</td></tr>{% endfor %}
+      </table></div>
+    </details>
+  </div>
+  <div class="card">
+    <strong>回饋類型（累計）</strong>
+    <table style="margin-top:8px">
+      {% for k in kinds %}<tr><td>{{ k.label }}</td><td class="n">{{ k.n }}</td><td class="n sub">{{ k.pct }}%</td></tr>{% endfor %}
+    </table>
+  </div>
+</div>
+
+<h2>各群組</h2>
+<div class="card scroll">
+  {% if groups %}
+  <table>
+    <tr><th>中心</th><th>LINE 群組</th><th class="n">訊息（7天／全部）</th><th class="n">回饋</th>
+      <th class="n">錯誤</th><th class="n">需求</th><th class="n">操作不便</th><th class="n">疑問</th>
+      <th class="n">未完成</th><th class="n">已修正</th><th>最後訊息</th></tr>
+    {% for g in groups %}
+    <tr>
+      <td class="nowrap"><a href="/admin/groups/{{ g.id }}">{{ g.label }}</a>{% if not g.active %} <span class="pill">已離開</span>{% endif %}</td>
+      <td class="sub nowrap">{{ g.name or '' }}</td>
+      <td class="n">{{ g.msgs7 }}／{{ g.msgs }}</td>
+      <td class="n">{{ g.fb }}</td>
+      <td class="n">{{ g.kinds.bug }}</td><td class="n">{{ g.kinds.feature }}</td>
+      <td class="n">{{ g.kinds.usability }}</td><td class="n">{{ g.kinds.question }}</td>
+      <td class="n"><a href="/admin/issues?group={{ g.id }}">{{ g.open_issues }}</a></td>
+      <td class="n">{{ g.resolved }}</td>
+      <td class="sub nowrap">{{ g.last_msg | t }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<div class="empty">機器人還沒有加入任何群組。</div>{% endif %}
+</div>
+
+<style>
+.chart { position: relative; margin-top: 12px; padding-left: 28px; }
+.chart .ymax { position: absolute; left: 0; top: -6px; font-size: 12px; color: var(--text-3); }
+.chart .cols { height: 180px; display: flex; align-items: flex-end; gap: 2px;
+  border-bottom: 1px solid var(--text-3); background: linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 100% 50%; }
+.chart .col { flex: 1; height: 100%; display: flex; align-items: flex-end; justify-content: center; outline: none; cursor: default; }
+.chart .col .b { width: 100%; max-width: 24px; min-height: 0; background: var(--series-1); border-radius: 4px 4px 0 0; }
+.chart .col:hover .b, .chart .col:focus .b { opacity: .8; }
+.chart .xl { display: flex; gap: 2px; font-size: 11px; color: var(--text-3); margin-top: 4px; }
+.chart .xl span { flex: 1; text-align: center; white-space: nowrap; overflow: visible; }
+@media (max-width: 640px) { .chart .xl span.minor { visibility: hidden; } }
+.chart .tip { position: absolute; top: 0; padding: 4px 8px; font-size: 12px; background: var(--text); color: var(--surface);
+  border-radius: 6px; pointer-events: none; white-space: nowrap; transform: translateX(-50%); }
+</style>
+<script>
+document.querySelectorAll('.chart').forEach(function (c) {
+  var tip = c.querySelector('.tip');
+  function show(e) {
+    var col = e.currentTarget, r = col.getBoundingClientRect(), cr = c.getBoundingClientRect();
+    tip.textContent = col.dataset.tip; tip.hidden = false;
+    var x = r.left - cr.left + r.width / 2, half = tip.offsetWidth / 2;
+    tip.style.left = Math.min(Math.max(x, half), cr.width - half) + 'px';
+  }
+  c.querySelectorAll('.col').forEach(function (col) {
+    col.addEventListener('mouseenter', show); col.addEventListener('focus', show);
+    col.addEventListener('mouseleave', function () { tip.hidden = true; });
+    col.addEventListener('blur', function () { tip.hidden = true; });
+  });
+});
+</script>
+{% endblock %}

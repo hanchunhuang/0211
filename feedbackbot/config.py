@@ -48,6 +48,9 @@ class Settings:
         "REPO_KNOWLEDGE_FILE", "database/seeders/support_bot_knowledge.json"))
     # commit 配對信心門檻：AI 判斷 high 才自動標記完成
     commit_match_min_confidence: str = field(default_factory=lambda: os.getenv("COMMIT_MATCH_MIN_CONFIDENCE", "high"))
+    # ---- 網頁後台 /admin（沒設密碼＝關閉）----
+    admin_web_user: str = field(default_factory=lambda: os.getenv("ADMIN_WEB_USER", "admin"))
+    admin_web_password: str = field(default_factory=lambda: os.getenv("ADMIN_WEB_PASSWORD", ""))
     # ---- Telegram 通知（選填，省 LINE 推播額度）----
     telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))

@@ -1,0 +1,7 @@
+<tr>
+  <td class="sub" style="white-space:nowrap">{{ m.created_at | t }}</td>
+  {% if show_group %}<td><a href="/admin/groups/{{ m.group_id }}">{{ label(m.group_id) }}</a></td>{% endif %}
+  <td style="white-space:nowrap">{{ m.display_name or '' }}</td>
+  <td class="msg">{% if m.kind == 'image' %}{% if m.image_path %}<a href="/admin/images/{{ m.id }}" target="_blank">🖼 截圖</a>{% else %}🖼 截圖（下載失敗）{% endif %}{% elif m.kind == 'file' %}📎 {{ m.text }}{% else %}{{ m.text }}{% endif %}</td>
+  <td style="white-space:nowrap">{% if m.feedback_id %}<span class="pill common">回饋 #{{ m.feedback_id }}</span>{% elif not m.processed %}<span class="pill draft">待整理</span>{% endif %}</td>
+</tr>

@@ -70,7 +70,22 @@ python -m feedbackbot serve --port 8000
 
 把機器人邀進各中心的群組後，用管理者帳號在每個群組裡輸入一次 `/center 中心名稱`。
 
-## 五、管理指令（私訊機器人）
+## 五、網頁後台
+
+在 `.env` 設定 `ADMIN_WEB_PASSWORD` 後，用瀏覽器開 `https://你的網域/admin`，帳號預設是 `admin`。沒設密碼時後台是關閉的。
+
+| 頁面 | 可以看到 |
+|---|---|
+| **總覽** | 近 7 天新回饋、未完成問題（共同／單一）、已修正但還沒公告的數量；每日新回饋長條圖（7／14／30／90 天，可切換群組）；回饋類型比例；**各群組統計表**（訊息量、回饋數、錯誤／需求／操作不便／疑問、未完成、已修正、最後訊息時間） |
+| **群組頁** | 這個群組反映過的問題（標示是否和其他中心共同）、每筆回饋、原始訊息（標出哪些已被整理成回饋）；可修改中心名稱 |
+| **問題** | 依狀態、共同或單一、類型、群組篩選；詳情頁有各中心的原話、AI 分析（含建議修改的檔案）、原始訊息、處理紀錄與 commit；可以直接在網頁上標記完成、修改中或不處理 |
+| **原始訊息** | 所有收集到的訊息，可搜尋、可依群組篩選，截圖可以點開 |
+| **公告** | 草稿預覽，可在網頁上「發送到群組」或略過；也有發送紀錄 |
+| **報告** | 每天的日報與成效評估 |
+
+手機也可以看。後台只有知道密碼的人能進入，並會擋下從其他網站送出的操作（CSRF）。
+
+## 六、管理指令（私訊機器人）
 
 | 指令 | 說明 |
 |---|---|
@@ -88,7 +103,7 @@ python -m feedbackbot serve --port 8000
 
 命令列也可以操作：`python -m feedbackbot digest | sync | announce | send | issues | issue 12 | resolve 12 "怎麼改" "在哪裡"`
 
-## 六、報告
+## 七、報告
 
 - `reports/YYYY-MM-DD-digest.md`：回饋日報，內容包括共同問題、單一問題、原因、建議修改、**建議修改的檔案**、使用者操作位置、風險、驗收方式和待辦總表。可以直接交給 Claude Code，請它依建議修改。
 - `reports/YYYY-MM-DD-evaluation.md`：修正成效評估，包括每題怎麼改、改在哪、由哪些 commit 修正，以及 AI 判斷修改是否真的回應了使用者。
@@ -109,6 +124,8 @@ python -m pytest -q        # 用假的 LINE、假的 AI 和臨時 git 程式庫�
 ```
 feedbackbot/
   app.py        Webhook 伺服器、事件處理、排程、通知（LINE / Telegram）
+  admin.py      網頁後台（/admin）
+  templates/    後台頁面
   pipeline.py   每日循環：digest / sync_commits / prepare_announcements / send
   llm.py        Claude 呼叫：萃取、歸類、查程式碼分析、commit 配對、評估、公告文案
   repo.py       唯讀存取系統程式庫（git grep / show / log、知識庫查詢）
