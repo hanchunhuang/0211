@@ -43,7 +43,7 @@
     <h2>原始訊息</h2>
     <details class="card" {{ 'open' if source | length <= 10 }}><summary class="sub">共 {{ source | length }} 則</summary><div class="scroll">{% if source %}<table>
       {% for m in source %}<tr><td class="sub" style="white-space:nowrap">{{ m.created_at | t }}</td><td>{{ label(m.group_id) }}</td><td style="white-space:nowrap">{{ m.display_name or '' }}</td>
-        <td class="msg">{% if m.kind == 'image' and m.image_path %}<a href="/admin/images/{{ m.id }}" target="_blank">🖼 截圖</a>{% else %}{{ m.text or '' }}{% endif %}</td></tr>{% endfor %}
+        <td class="msg">{% if m.kind == 'image' and m.image_ref %}<a href="/admin/images/{{ m.id }}" target="_blank">🖼 截圖</a>{% else %}{{ m.text or '' }}{% endif %}</td></tr>{% endfor %}
     </table>{% else %}<div class="empty">沒有對應的原始訊息。</div>{% endif %}</div></details>
   </div>
 

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}登入｜回饋後台{% endblock %}
+{% block body %}
+<div class="card" style="max-width:360px;margin:48px auto">
+  <h1>登入後台</h1>
+  {% if error %}<p style="color:var(--bad)">密碼錯誤，請再試一次。</p>{% endif %}
+  <form method="post" action="/admin/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label class="sub" for="pw">密碼</label>
+    <input id="pw" type="password" name="password" autocomplete="current-password" required autofocus
+           style="width:100%;font:inherit;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text)">
+    <p><button class="primary" style="width:100%">登入</button></p>
+  </form>
+</div>
+{% endblock %}

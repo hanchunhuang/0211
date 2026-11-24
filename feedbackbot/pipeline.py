@@ -12,7 +12,6 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Settings
@@ -39,14 +38,15 @@ class DigestResult:
     date: str
     new_feedback: int = 0
     touched_issue_ids: list[int] = field(default_factory=list)
-    report_path: Path | None = None
+    report_name: str | None = None
     admin_summary: str = ""
 
 
-def _transcript(db: DB, rows: list, staff_ids: list[str] | None = None) -> tuple[str, list[tuple[int, Path]]]:
+def _transcript(db: DB, rows: list, staff_ids: list[str] | None = None,
+                files=None) -> tuple[str, list[tuple[int, bytes, str]]]:
     by_line_id = {r["line_message_id"]: r["id"] for r in rows if r["line_message_id"]}
     lines: list[str] = []
-    images: list[tuple[int, Path]] = []
+    images: list[tuple[int, bytes, str]] = []
     for r in rows:
         t = datetime.fromisoformat(r["created_at"]).strftime("%m/%d %H:%M")
         name = r["display_name"] or "使用者"
@@ -60,8 +60,9 @@ def _transcript(db: DB, rows: list, staff_ids: list[str] | None = None) -> tuple
             body = r["text"] or ""
         elif r["kind"] == "image":
             body = "[傳送了一張截圖]"
-            if r["image_path"] and Path(r["image_path"]).exists():
-                images.append((r["id"], Path(r["image_path"])))
+            got = files.read(r["image_ref"]) if (files is not None and r.get("image_ref")) else None
+            if got:
+                images.append((r["id"], got[0], got[1]))
         else:
             body = f"[{r['kind']}]"
         lines.append(f"#{r['id']} [{t}] {name}{quote}: {body}")
@@ -69,7 +70,7 @@ def _transcript(db: DB, rows: list, staff_ids: list[str] | None = None) -> tuple
 
 
 def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
-           repo: CodeRepo | None = None) -> DigestResult:
+           repo: CodeRepo | None = None, files=None) -> DigestResult:
     now = now or now_in(settings)
     day = now.strftime("%Y-%m-%d")
     res = DigestResult(date=day)
@@ -77,7 +78,7 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
         # ---- 1. 每個群組各自萃取回饋 ----
         for group_id, rows in db.unprocessed_messages().items():
             company = db.group_label(group_id)
-            transcript, images = _transcript(db, rows, settings.staff_user_ids)
+            transcript, images = _transcript(db, rows, settings.staff_user_ids, files)
             valid_ids = {r["id"] for r in rows}
             if any(r["kind"] in ("text", "image") for r in rows):
                 extraction = llm.extract(company, transcript, images[: settings.max_images_per_group])
@@ -149,7 +150,7 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
         res.touched_issue_ids = sorted(touched)
 
         # ---- 4. 日報 ----
-        res.report_path = _write_digest_report(db, settings, res, now)
+        res.report_name = _write_digest_report(db, settings, res, now)
         res.admin_summary = _admin_digest_summary(db, res)
         return res
 
@@ -204,8 +205,7 @@ def _issue_md(db: DB, issue_id: int, today: str) -> str:
     return "\n".join(out)
 
 
-def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: datetime) -> Path:
-    settings.reports_dir.mkdir(parents=True, exist_ok=True)
+def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: datetime) -> str:
     common = [i for i in res.touched_issue_ids if _is_common(db, i)]
     single = [i for i in res.touched_issue_ids if not _is_common(db, i)]
     backlog = db.open_issues()
@@ -238,9 +238,9 @@ def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: dat
         "- 也可以 LINE 私訊機器人：`/resolve 編號 怎麼改的 | 在哪裡`",
         "",
     ]
-    path = settings.reports_dir / f"{res.date}-digest.md"
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+    name = f"{res.date}-digest.md"
+    db.save_report(name, "\n".join(lines), now)
+    return name
 
 
 def _admin_digest_summary(db: DB, res: DigestResult) -> str:
@@ -368,7 +368,7 @@ def _admin_sync_summary(db: DB, res: SyncResult) -> str:
 class AnnounceResult:
     date: str
     draft_ids: list[int] = field(default_factory=list)
-    evaluation_path: Path | None = None
+    evaluation_name: str | None = None
     admin_summary: str = ""
 
 
@@ -379,8 +379,7 @@ def prepare_announcements(db: DB, llm: LLM, settings: Settings, now: datetime | 
     with RUN_LOCK:
         # ---- 成效評估：自上次評估後新完成的問題 ----
         since = db.get_kv("last_evaluation_at") or "0000"
-        newly = db.q("SELECT * FROM issues WHERE status IN ('resolved','wontfix') AND resolved_at > ? ORDER BY id",
-                     (since,))
+        newly = db.issues_resolved_since(since)
         if newly:
             payload = [
                 {"issue_id": i["id"], "title": i["title"], "status": i["status"], "summary": i["summary"],
@@ -391,16 +390,13 @@ def prepare_announcements(db: DB, llm: LLM, settings: Settings, now: datetime | 
                 for i in newly
             ]
             report = llm.evaluate(payload)
-            res.evaluation_path = _write_evaluation(db, settings, day, newly, report, now)
+            res.evaluation_name = _write_evaluation(db, settings, day, newly, report, now)
             db.set_kv("last_evaluation_at", now.isoformat())
 
         # ---- 每個群組各自的修正公告 ----
-        for g in db.q("SELECT * FROM groups WHERE active=1"):
+        for g in db.groups(active_only=True):
             done = db.announced_issue_ids(g["id"])
-            rows = db.q(
-                """SELECT DISTINCT i.* FROM issues i JOIN feedback f ON f.issue_id=i.id
-                   WHERE f.group_id=? AND i.status='resolved' ORDER BY i.id""", (g["id"],))
-            todo = [i for i in rows if i["id"] not in done]
+            todo = [i for i in db.issues_for_group(g["id"]) if i["status"] == "resolved" and i["id"] not in done]
             if not todo:
                 continue
             items = []
@@ -419,7 +415,7 @@ def prepare_announcements(db: DB, llm: LLM, settings: Settings, now: datetime | 
         return res
 
 
-def _write_evaluation(db: DB, settings: Settings, day: str, issues: list, report, now: datetime) -> Path:
+def _write_evaluation(db: DB, settings: Settings, day: str, issues: list, report, now: datetime) -> str:
     ev = {e.issue_id: e for e in report.evaluations}
     mark = {"yes": "✅ 已回應", "partial": "🟡 部分回應", "no": "❌ 未回應", "unclear": "❔ 無法判斷"}
     lines = [f"# 修正成效評估 {day}", "", f"產生時間：{now.strftime('%Y-%m-%d %H:%M')}", "",
@@ -437,18 +433,16 @@ def _write_evaluation(db: DB, settings: Settings, day: str, issues: list, report
               f"## 尚未完成（{len(remaining)}）", "",
               *[f"- #{i['id']} [{i['priority'] or '-'}] {i['title']}（{STATUS_ZH.get(i['status'])}）" for i in remaining],
               ""]
-    path = settings.reports_dir / f"{day}-evaluation.md"
-    settings.reports_dir.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+    name = f"{day}-evaluation.md"
+    db.save_report(name, "\n".join(lines), now)
+    return name
 
 
 def _admin_announce_summary(db: DB, res: AnnounceResult, auto_push: bool) -> str:
     if not res.draft_ids:
         return f"📣 {res.date}：沒有需要公告的修正。"
     parts = [f"📣 {res.date} 修正公告草稿 {len(res.draft_ids)} 則", ""]
-    for d in db.q(f"SELECT * FROM announcements WHERE id IN ({','.join('?' * len(res.draft_ids))})",
-                  tuple(res.draft_ids)):
+    for d in (db.announcement(i) for i in res.draft_ids):
         parts += [f"【草稿 {d['id']}】→ {db.group_label(d['group_id'])}", d["text"], "—" * 10]
     parts.append("將自動推播。" if auto_push else "確認無誤請回覆 /approve（全部）或 /approve 草稿編號；不要發送：/skip 草稿編號")
     return "\n".join(parts)

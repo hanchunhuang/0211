@@ -96,7 +96,7 @@ def handle(ctx: Ctx, text: str) -> str:
                 out.append("檔案：" + "、".join(f["path"] for f in a["files_to_change"]))
         if i["resolution_note"]:
             out += ["", f"處理：{i['resolution_note']}｜{i['resolution_location'] or ''}"]
-            commits = json.loads(i["fix_commits"] or "[]") if "fix_commits" in i.keys() else []
+            commits = json.loads(i.get("fix_commits") or "[]")
             if commits:
                 out.append(f"commit：{', '.join(commits)}（{'自動配對' if i['auto_resolved'] else '手動'}）")
         return "\n".join(out)
@@ -148,7 +148,7 @@ def handle(ctx: Ctx, text: str) -> str:
         return f"已略過草稿 {', '.join(map(str, ids))}" if ids else "格式：/skip 草稿編號"
 
     if cmd == "/groups":
-        rows = db.q("SELECT * FROM groups ORDER BY joined_at")
+        rows = db.groups()
         if not rows:
             return "機器人還沒有加入任何群組"
         return "\n".join(f"{'🟢' if g['active'] else '⚪'} {g['company'] or '-'}（{g['name'] or ''}）代碼 {g['id'][-8:]}"
@@ -159,7 +159,7 @@ def handle(ctx: Ctx, text: str) -> str:
             db.set_group_company(ctx.group_id, rest)
             return f"此群組的中心名稱設為：{rest}"
         code, _, name = rest.partition(" ")
-        g = db.one("SELECT id FROM groups WHERE id LIKE ?", (f"%{code}",)) if code else None
+        g = db.find_group_by_suffix(code)
         if not g or not name.strip():
             return "格式：/center 群組代碼 中心名稱（代碼可用 /groups 查）"
         db.set_group_company(g["id"], name.strip())

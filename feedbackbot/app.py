@@ -1,11 +1,13 @@
 """Webhook 伺服器 + 每日排程。
 
-啟動：uvicorn feedbackbot.app:app --host 0.0.0.0 --port 8000
+啟動：python -m feedbackbot serve（或 uvicorn feedbackbot.app:app）
 LINE Developers 的 Webhook URL 設為 https://你的網域/callback
+在 Cloud Run 上：ENABLE_SCHEDULER=false，改由 Cloud Scheduler 呼叫 POST /tasks/digest、/tasks/announce
 """
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 
 import httpx
@@ -18,7 +20,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from . import commands, pipeline
-from .admin import build_router
+from .admin import LoginRequired, build_router, login_redirect_handler
 from .config import Settings
 from .db import DB
 from .line_api import LineClient, verify_signature
@@ -30,14 +32,16 @@ log = logging.getLogger("feedbackbot")
 
 
 class Bot:
-    def __init__(self, settings: Settings | None = None, db: DB | None = None, line=None, llm=None, repo=None):
+    def __init__(self, settings: Settings | None = None, db: DB | None = None, line=None, llm=None, repo=None,
+                 files=None):
         self.s = settings or Settings()
         self.s.ensure_dirs()
-        self.db = db or DB(self.s.db_path)
+        self.db = db or self.s.make_db()
+        self.files = files or self.s.make_files()
         self.line = line or LineClient(self.s.line_access_token)
         self.llm = llm or ClaudeLLM(self.s.claude_model, knowledge_file=self.s.repo_knowledge_file)
         self.repo = repo if repo is not None else (
-            CodeRepo(self.s.repo_path, self.s.repo_branch) if self.s.repo_path else None)
+            CodeRepo(self.s.repo_path, self.s.repo_branch, url=self.s.repo_url) if self.s.repo_path else None)
         self.tz = ZoneInfo(self.s.timezone)
         self._names: dict[tuple[str, str], str] = {}
 
@@ -65,8 +69,8 @@ class Bot:
     # ---------------- 排程工作 ----------------
     def job_digest(self) -> str:
         try:
-            res = pipeline.digest(self.db, self.llm, self.s, self.now(), repo=self.repo)
-            msg = res.admin_summary + (f"\n\n完整日報：{res.report_path}" if res.report_path else "")
+            res = pipeline.digest(self.db, self.llm, self.s, self.now(), repo=self.repo, files=self.files)
+            msg = res.admin_summary + (f"\n\n完整日報：{self._report_link(res.report_name)}" if res.report_name else "")
         except Exception as e:  # noqa: BLE001
             log.exception("digest failed")
             msg = f"⚠️ 整理回饋失敗：{e}"
@@ -88,8 +92,8 @@ class Bot:
         try:
             res = pipeline.prepare_announcements(self.db, self.llm, self.s, self.now())
             msg = (sync_msg + "\n\n" if sync_msg else "") + res.admin_summary
-            if res.evaluation_path:
-                msg += f"\n\n成效評估報告：{res.evaluation_path}"
+            if res.evaluation_name:
+                msg += f"\n\n成效評估報告：{self._report_link(res.evaluation_name)}"
             if self.s.auto_push and res.draft_ids:
                 results = pipeline.send_announcements(self.db, self.line, self.now(), res.draft_ids)
                 msg += "\n\n" + "\n".join(f"草稿 {i}：{r}" for i, r in results)
@@ -107,7 +111,7 @@ class Bot:
         ts = datetime.fromtimestamp(ev.get("timestamp", 0) / 1000, self.tz)
 
         if etype == "join" and chat_id:
-            name = self.line.group_name(chat_id) if src.get("groupId") else None
+            name = self._group_name(chat_id) if src.get("groupId") else None
             self.db.upsert_group(chat_id, ts, name)
             self.notify_admins(f"🤖 回饋收集機器人已加入群組「{name or chat_id}」。請在該群組輸入 /center 中心名稱 設定對應的中心。")
             return
@@ -133,8 +137,8 @@ class Bot:
 
         if not chat_id:
             return
-        if not self.db.one("SELECT 1 FROM groups WHERE id=?", (chat_id,)):
-            name = self.line.group_name(chat_id) if src.get("groupId") else None
+        if not self.db.group(chat_id):
+            name = self._group_name(chat_id) if src.get("groupId") else None
             self.db.upsert_group(chat_id, ts, name)
 
         # ---- 群組內管理者指令（不收進回饋）----
@@ -155,11 +159,31 @@ class Bot:
         if kind == "text":
             self.db.add_message(kind="text", text=text, **record)
         elif kind == "image":
-            path = self.line.download_content(msg["id"], self.s.images_dir / chat_id[-8:] / msg["id"])
-            self.db.add_message(kind="image", image_path=str(path) if path else None, **record)
+            ref = None
+            try:
+                got = self.line.download_content(msg["id"])
+                if got:
+                    data, ctype = got
+                    ext = {"image/png": "png", "image/gif": "gif", "image/webp": "webp"}.get(ctype, "jpg")
+                    ref = self.files.save(f"images/{chat_id[-8:]}/{msg['id']}.{ext}", data, ctype)
+            except Exception:  # noqa: BLE001  圖存不了也要留下這則訊息
+                log.warning("儲存截圖失敗", exc_info=True)
+            self.db.add_message(kind="image", image_ref=ref, **record)
         elif kind == "file":
             self.db.add_message(kind="file", text=msg.get("fileName"), **record)
         # 貼圖、影片、語音等不收
+
+    def _group_name(self, chat_id: str) -> str | None:
+        try:
+            return self.line.group_name(chat_id)
+        except Exception:  # noqa: BLE001  取不到名稱不影響收集
+            log.warning("取得群組名稱失敗", exc_info=True)
+            return None
+
+    def _report_link(self, name: str) -> str:
+        if self.s.public_base_url:
+            return f"{self.s.public_base_url}/admin/reports?name={name}"
+        return f"後台「報告」→ {name}"
 
     def _display_name(self, chat_id: str, user_id: str | None) -> str | None:
         if not user_id:
@@ -208,17 +232,38 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         b = get_bot()
-        sched = b.start_scheduler() if start_scheduler else None
+        sched = b.start_scheduler() if (start_scheduler and b.s.enable_scheduler) else None
         yield
         if sched:
             sched.shutdown(wait=False)
 
     api = FastAPI(title="LINE Feedback Bot", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     api.include_router(build_router(get_bot))
+    api.add_exception_handler(LoginRequired, login_redirect_handler)
+
+    @api.middleware("http")
+    async def no_cache_admin(request: Request, call_next):
+        resp = await call_next(request)
+        if request.url.path.startswith(("/admin", "/tasks")):
+            # 不讓 Firebase Hosting／瀏覽器快取後台頁面
+            resp.headers["Cache-Control"] = "private, no-store"
+        return resp
 
     @api.get("/healthz")
     def healthz() -> dict:
         return {"ok": True}
+
+    @api.post("/tasks/{job}")
+    def run_task(job: str, request: Request) -> dict:
+        """給 Cloud Scheduler 呼叫的排程工作（需帶 X-Task-Token）。"""
+        b = get_bot()
+        token = request.headers.get("x-task-token", "")
+        if not b.s.task_token or not secrets.compare_digest(token.encode(), b.s.task_token.encode()):
+            raise HTTPException(status_code=403, detail="forbidden")
+        jobs = {"digest": b.job_digest, "announce": b.job_announce, "sync": b.job_sync}
+        if job not in jobs:
+            raise HTTPException(status_code=404, detail="unknown job")
+        return {"ok": True, "summary": jobs[job]()}
 
     @api.post("/callback")
     async def callback(request: Request, background: BackgroundTasks) -> dict:

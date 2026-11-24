@@ -91,6 +91,7 @@ pre.report { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-mo
     <a href="/admin/announcements" class="{{ 'on' if nav == 'announcements' }}">公告</a>
     <a href="/admin/reports" class="{{ 'on' if nav == 'reports' }}">報告</a>
   </nav>
+  {% if nav != 'login' %}<form method="post" action="/admin/logout" style="margin-left:auto"><button>登出</button></form>{% endif %}
 </div></header>
 <main>{% block body %}{% endblock %}</main>
 </body>

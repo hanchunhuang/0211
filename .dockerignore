@@ -1,0 +1,9 @@
+.git
+.venv
+.env
+data
+tests
+deploy
+firebase
+**/__pycache__
+*.md

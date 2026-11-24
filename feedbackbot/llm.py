@@ -7,8 +7,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import mimetypes
-from pathlib import Path
 from typing import Literal, Protocol
 
 import anthropic
@@ -106,7 +104,7 @@ class EvaluationReport(BaseModel):
 
 
 class LLM(Protocol):
-    def extract(self, company: str, transcript: str, images: list[tuple[int, Path]]) -> Extraction: ...
+    def extract(self, company: str, transcript: str, images: list[tuple[int, bytes, str]]) -> Extraction: ...
     def cluster(self, open_issues: list[dict], new_feedback: list[dict]) -> Clustering: ...
     def analyze(self, issue: dict, feedback: list[dict], system_context: str, repo=None) -> Analysis: ...
     def match_commits(self, open_issues: list[dict], commits: list[dict], system_context: str,
@@ -190,7 +188,7 @@ class ClaudeLLM:
         return parsed
 
     # -- 1. 萃取回饋 --
-    def extract(self, company: str, transcript: str, images: list[tuple[int, Path]]) -> Extraction:
+    def extract(self, company: str, transcript: str, images: list[tuple[int, bytes, str]]) -> Extraction:
         system = (
             "你是軟體產品的客服分析師。開發者把一套長照管理系統（多租戶 SaaS）提供給多家長照中心使用，"
             "並在各中心的 LINE 群組裡收集使用者意見（群組內也有客服機器人「滿福寶」與客服人員在回答操作問題）。"
@@ -207,8 +205,8 @@ class ClaudeLLM:
             "- 用繁體中文。\n" + SAFETY
         )
         content: list[dict] = []
-        for msg_id, path in images:
-            data = _image_block(path)
+        for msg_id, raw, media_type in images:
+            data = _image_block(raw, media_type)
             if data:
                 content.append({"type": "text", "text": f"[訊息 #{msg_id} 的截圖]"})
                 content.append(data)
@@ -293,16 +291,13 @@ class ClaudeLLM:
         return self._text(system, f"中心：{company}\n<data>\n{data}\n</data>", effort="low")
 
 
-def _image_block(path: Path) -> dict | None:
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return None
+def _image_block(raw: bytes, media_type: str) -> dict | None:
     if len(raw) > 4_500_000:  # API 單張圖片上限約 5MB
-        log.info("skip large image %s", path)
+        log.info("skip large image (%d bytes)", len(raw))
         return None
-    media = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-    return {"type": "image", "source": {"type": "base64", "media_type": media,
+    if media_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+        return None
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type,
                                         "data": base64.standard_b64encode(raw).decode()}}
 
 

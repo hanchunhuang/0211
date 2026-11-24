@@ -1,4 +1,6 @@
-# 部署到主機
+# 部署到自己的主機（Ubuntu）
+
+> 想用 Firebase（Firestore＋Firebase 網域）請改看 [DEPLOY-FIREBASE.md](DEPLOY-FIREBASE.md)。
 
 以下以 **Ubuntu 22.04 或 24.04** 為例：用 Nginx 處理 HTTPS，用 systemd 讓程式常駐。
 可以放在現有的正式機上（另開一個子網域，不影響 Laravel），也可以另開一台小主機（1 核 1GB 就夠）。
@@ -82,7 +84,6 @@ LINE_CHANNEL_ACCESS_TOKEN=新頻道的 access token
 ANTHROPIC_API_KEY=Claude API 金鑰
 
 DATA_DIR=/srv/feedback-bot/data
-REPORTS_DIR=/srv/feedback-bot/reports
 REPO_PATH=/srv/feedback-bot/line-hokiya-survey
 
 ADMIN_WEB_PASSWORD=剛剛產生的密碼
@@ -177,7 +178,6 @@ sudo systemctl restart feedbackbot
 | `/srv/feedback-bot/app/` | 機器人程式與 `.env` |
 | `/srv/feedback-bot/data/feedback.db` | 資料庫（訊息、回饋、問題、公告） |
 | `/srv/feedback-bot/data/images/` | 群組截圖 |
-| `/srv/feedback-bot/reports/` | 日報、成效評估 |
 | `/srv/feedback-bot/line-hokiya-survey/` | 你系統程式碼的唯讀副本 |
 | `/srv/feedback-bot/backups/` | 每日備份 |
 

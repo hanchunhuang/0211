@@ -5,7 +5,6 @@ import base64
 import hashlib
 import hmac
 import logging
-from pathlib import Path
 
 import httpx
 
@@ -70,14 +69,10 @@ class LineClient:
             return r.json().get("displayName")
         return None
 
-    def download_content(self, message_id: str, dest: Path) -> Path | None:
+    def download_content(self, message_id: str) -> tuple[bytes, str] | None:
+        """下載使用者傳的圖片／檔案。回傳 (內容, content-type)。"""
         r = self.http.get(f"{DATA_API}/message/{message_id}/content")
         if r.status_code != 200:
             log.warning("download content failed %s", r.status_code)
             return None
-        ctype = r.headers.get("content-type", "image/jpeg")
-        ext = {"image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}.get(ctype, ".jpg")
-        path = dest.with_suffix(ext)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(r.content)
-        return path
+        return r.content, r.headers.get("content-type", "image/jpeg").split(";")[0]

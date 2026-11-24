@@ -60,7 +60,10 @@ cp .env.example .env        # 填入 LINE、Claude、REPO_PATH 等
 
 ## 四、啟動
 
-**正式部署到主機的完整步驟（Ubuntu + Nginx + HTTPS + systemd + 備份）請看 [DEPLOY.md](DEPLOY.md)。**
+正式部署有兩種方式，擇一即可：
+
+- **Firebase**（Firestore 資料庫＋Firebase 網域，不用管主機）：看 [DEPLOY-FIREBASE.md](DEPLOY-FIREBASE.md)
+- **自己的 Ubuntu 主機**（SQLite＋Nginx＋systemd）：看 [DEPLOY.md](DEPLOY.md)
 
 
 ```bash
@@ -75,7 +78,7 @@ python -m feedbackbot serve --port 8000
 
 ## 五、網頁後台
 
-在 `.env` 設定 `ADMIN_WEB_PASSWORD` 後，用瀏覽器開 `https://你的網域/admin`，帳號預設是 `admin`。沒設密碼時後台是關閉的。
+在 `.env` 設定 `ADMIN_WEB_PASSWORD` 後，用瀏覽器開 `https://你的網域/admin`，輸入密碼登入（登入狀態保留 12 小時）。沒設密碼時後台是關閉的。
 
 | 頁面 | 可以看到 |
 |---|---|
@@ -108,8 +111,10 @@ python -m feedbackbot serve --port 8000
 
 ## 七、報告
 
-- `reports/YYYY-MM-DD-digest.md`：回饋日報，內容包括共同問題、單一問題、原因、建議修改、**建議修改的檔案**、使用者操作位置、風險、驗收方式和待辦總表。可以直接交給 Claude Code，請它依建議修改。
-- `reports/YYYY-MM-DD-evaluation.md`：修正成效評估，包括每題怎麼改、改在哪、由哪些 commit 修正，以及 AI 判斷修改是否真的回應了使用者。
+報告存在資料庫裡，在後台的「報告」頁查看：
+
+- `YYYY-MM-DD-digest.md`：回饋日報，內容包括共同問題、單一問題、原因、建議修改、**建議修改的檔案**、使用者操作位置、風險、驗收方式和待辦總表。可以直接交給 Claude Code，請它依建議修改。
+- `YYYY-MM-DD-evaluation.md`：修正成效評估，包括每題怎麼改、改在哪、由哪些 commit 修正，以及 AI 判斷修改是否真的回應了使用者。
 
 ## 注意事項
 
@@ -121,7 +126,9 @@ python -m feedbackbot serve --port 8000
 ## 開發
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest -q        # 用假的 LINE、假的 AI 和臨時 git 程式庫，跑完整一天的循環
+# 也要測 Firestore：先啟動 Firestore 模擬器，再設 FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 跑同一組測試
 ```
 
 ```
@@ -133,7 +140,9 @@ feedbackbot/
   llm.py        Claude 呼叫：萃取、歸類、查程式碼分析、commit 配對、評估、公告文案
   repo.py       唯讀存取系統程式庫（git grep / show / log、知識庫查詢）
   commands.py   管理者指令
-  db.py         SQLite
+  db.py         資料存取（問題、回饋、公告…）
+  store.py      底層儲存：Firestore 或 SQLite
+  files.py      截圖儲存：Firebase Storage 或本機
   line_api.py   LINE Messaging API
   cli.py        命令列
 ```

@@ -16,7 +16,9 @@ from feedbackbot.app import Bot, create_app
 from feedbackbot.config import Settings
 from feedbackbot.db import DB
 from feedbackbot.line_api import split_text, verify_signature
+import os
 import subprocess
+import uuid
 
 from feedbackbot.llm import (Analysis, Assignment, Clustering, CommitMatch, CommitMatching, Evaluation,
                              EvaluationReport, Extraction, ExtractedFeedback, NewIssue)
@@ -102,24 +104,36 @@ def sign(body: bytes) -> str:
     return base64.b64encode(hmac.new(SECRET.encode(), body, hashlib.sha256).digest()).decode()
 
 
-@pytest.fixture
-def env(tmp_path):
+def _make_db(backend: str):
+    if backend == "sqlite":
+        return DB(":memory:")
+    if not os.getenv("FIRESTORE_EMULATOR_HOST"):
+        pytest.skip("沒有 Firestore 模擬器（設定 FIRESTORE_EMULATOR_HOST 才會測）")
+    from feedbackbot.store import FirestoreStore
+    return DB(FirestoreStore("demo-test", prefix=f"t{uuid.uuid4().hex[:8]}_"))
+
+
+@pytest.fixture(params=["sqlite", "firestore"])
+def env(tmp_path, request):
     s = Settings()
     s.line_channel_secret = SECRET
     s.admin_user_ids = [ADMIN]
     s.data_dir = tmp_path / "data"
-    s.reports_dir = tmp_path / "reports"
     s.system_context_file = tmp_path / "none.md"
     s.auto_push = False
     s.staff_user_ids = ["Ustaff"]
     s.repo_auto_update = False
     line = FakeLine()
-    bot = Bot(settings=s, db=DB(":memory:"), line=line, llm=FakeLLM())
+    bot = Bot(settings=s, db=_make_db(request.param), line=line, llm=FakeLLM())
     client = TestClient(create_app(bot, start_scheduler=False))
     return bot, line, client
 
 
 _n = [0]
+
+
+def issue_by_title(bot, title):
+    return next(i for i in bot.db.all_issues() if i["title"] == title)
 
 
 def post(client, *events):
@@ -160,24 +174,24 @@ def test_full_daily_cycle(env):
          text_ev(GA, "Ustaff", "這個我們確認一下"),
          text_ev(GA, ADMIN, "/center 甲公司"))  # 管理者指令不會被收進回饋
     assert bot.db.group_label(GA) == "甲公司"
-    assert bot.db.one("SELECT COUNT(*) c FROM messages")["c"] == 5
+    assert bot.db.count_messages() == 5
 
     # ---- 晚上：整理 ----
     res = pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
     assert res.new_feedback == 3
     assert any("（客服）" in t for t in bot.llm.transcripts)
-    report = res.report_path.read_text(encoding="utf-8")
+    report = bot.db.report(res.report_name)["content"]
     common = report.split("## 一、共同問題")[1].split("## 二、")[0]
     single = report.split("## 二、單一中心問題")[1].split("## 三、")[0]
     assert "匯出缺出貨日期" in common and "甲公司" in common and "乙公司" in common
     assert "低庫存提醒" in single
     assert "大家中午吃什麼" not in report
-    export_issue = bot.db.one("SELECT id FROM issues WHERE title='匯出缺出貨日期'")["id"]
+    export_issue = issue_by_title(bot, "匯出缺出貨日期")["id"]
 
     # 隔天又有人回報同一問題 → 歸入既有問題，不新增
     post(client, text_ev(GB, "U2", "匯出還是沒有出貨日期喔", ts=datetime(2026, 11, 22, 10, 0, tzinfo=TZ)))
     pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 22, 23, 30, tzinfo=TZ))
-    assert bot.db.one("SELECT COUNT(*) c FROM issues")["c"] == 2
+    assert len(bot.db.all_issues()) == 2
 
     # ---- 開發者改完：私訊機器人標記 ----
     post(client, text_ev(None, ADMIN, f"/resolve {export_issue} 匯出檔新增出貨日期欄位 | 訂單管理 > 匯出 Excel"))
@@ -186,7 +200,7 @@ def test_full_daily_cycle(env):
     # ---- 隔天早上：評估 + 公告草稿 ----
     ann = pipeline.prepare_announcements(bot.db, bot.llm, bot.s, datetime(2026, 11, 23, 9, 0, tzinfo=TZ))
     assert len(ann.draft_ids) == 2  # 甲、乙都反映過
-    assert "訂單管理 > 匯出 Excel" in ann.evaluation_path.read_text(encoding="utf-8")
+    assert "訂單管理 > 匯出 Excel" in bot.db.report(ann.evaluation_name)["content"]
     assert not line.pushes or all(to == ADMIN for to, _ in line.pushes)  # 尚未推播到群組
 
     post(client, text_ev(None, ADMIN, "/approve"))
@@ -250,8 +264,8 @@ def test_commit_sync_resolves_issues(env, code_repo):
     _git(code_repo.path, "commit", "-qm", "feat: 庫存頁面調整")
     res = pipeline.sync_commits(bot.db, bot.llm, bot.s, code_repo, datetime(2026, 11, 23, 8, 0, tzinfo=TZ))
     assert res.commits == 2
-    export = bot.db.one("SELECT * FROM issues WHERE title='匯出缺出貨日期'")
-    stock = bot.db.one("SELECT * FROM issues WHERE title='低庫存提醒'")
+    export = issue_by_title(bot, "匯出缺出貨日期")
+    stock = issue_by_title(bot, "低庫存提醒")
     assert export["status"] == "resolved" and export["auto_resolved"] == 1
     assert export["resolution_location"] == "訂單管理 → 匯出 Excel"
     assert stock["status"] != "resolved" and any(f"/resolve {stock['id']}" in t for t in res.suggestions)
@@ -272,46 +286,97 @@ def test_admin_web(env):
     pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
 
     # 沒設密碼 → 後台關閉；設了密碼 → 需要登入
-    assert client.get("/admin", auth=("admin", "x")).status_code == 503
+    assert client.get("/admin/login").status_code == 503
     bot.s.admin_web_password = "pw"
-    assert client.get("/admin").status_code == 401
-    assert client.get("/admin", auth=("admin", "wrong")).status_code == 401
-    auth = ("admin", "pw")
+    r = client.get("/admin/issues?status=all", follow_redirects=False)
+    assert r.status_code == 303 and "/admin/login?next=" in r.headers["location"]
+    assert client.post("/admin/issues/1/resolve", data={"note": "x"}).status_code == 401
+    origin = {"origin": "http://testserver"}
+    r = client.post("/admin/login", data={"password": "wrong"}, headers=origin, follow_redirects=False)
+    assert "error=1" in r.headers["location"]
+    assert client.post("/admin/login", data={"password": "pw"}, follow_redirects=False).status_code == 403  # 沒有來源
+    r = client.post("/admin/login", data={"password": "pw", "next": "//evil.example"}, headers=origin,
+                    follow_redirects=False)
+    assert r.headers["location"] == "/admin" and "__session" in r.cookies
 
-    r = client.get("/admin", auth=auth)
+    r = client.get("/admin")
     assert r.status_code == 200 and "甲公司-系統群" in r.text and "每日新回饋" in r.text
-    r = client.get(f"/admin?group={GA}&days=30", auth=auth)
+    r = client.get(f"/admin?group={GA}&days=30")
     assert r.status_code == 200
 
-    r = client.get(f"/admin/groups/{GA}", auth=auth)
+    r = client.get(f"/admin/groups/{GA}")
     assert r.status_code == 200 and "匯出缺出貨日期" in r.text and "共同（2 家）" in r.text
     assert "<script>alert(1)</script>" not in r.text and "&lt;script&gt;" in r.text  # 群組訊息會被跳脫
 
-    r = client.get("/admin/issues?scope=common", auth=auth)
+    r = client.get("/admin/issues?scope=common")
     assert "匯出缺出貨日期" in r.text and "低庫存提醒" not in r.text
-    iid = bot.db.one("SELECT id FROM issues WHERE title='匯出缺出貨日期'")["id"]
-    r = client.get(f"/admin/issues/{iid}", auth=auth)
+    iid = issue_by_title(bot, "匯出缺出貨日期")["id"]
+    r = client.get(f"/admin/issues/{iid}")
     assert r.status_code == 200 and "乙公司-系統群" in r.text and "訂單管理 → 匯出" in r.text
 
-    r = client.get("/admin/messages?q=庫存", auth=auth)
+    r = client.get("/admin/messages?q=庫存")
     assert "希望有庫存提醒" in r.text and "訂單匯出" not in r.text
 
     # 跨站表單會被擋；同源才可以
-    assert client.post(f"/admin/issues/{iid}/resolve", data={"note": "x"}, auth=auth).status_code == 403
+    assert client.post(f"/admin/issues/{iid}/resolve", data={"note": "x"}).status_code == 403
     r = client.post(f"/admin/issues/{iid}/resolve", data={"note": "匯出加上出貨日期", "location": "訂單管理 → 匯出"},
-                    auth=auth, headers={"origin": "http://testserver"}, follow_redirects=False)
+                    headers={"origin": "http://testserver"}, follow_redirects=False)
     assert r.status_code == 303 and bot.db.issue(iid)["status"] == "resolved"
 
     # 公告：從網頁發送
     pipeline.prepare_announcements(bot.db, bot.llm, bot.s, datetime(2026, 11, 22, 9, 0, tzinfo=TZ))
-    r = client.get("/admin/announcements", auth=auth)
+    r = client.get("/admin/announcements")
     assert "發送到群組" in r.text
     aid = bot.db.drafts()[0]["id"]
-    client.post(f"/admin/announcements/{aid}/approve", auth=auth, headers={"origin": "http://testserver"})
+    client.post(f"/admin/announcements/{aid}/approve", headers={"origin": "http://testserver"})
     assert any(to in (GA, GB) for to, _ in line.pushes)
-    r = client.get("/admin/reports", auth=auth)
+    r = client.get("/admin/reports")
     assert "日報" in r.text
     name = r.text.split("?name=")[1].split('"')[0]
-    assert client.get(f"/admin/reports?name={name}", auth=auth).status_code == 200
-    assert client.get("/admin/reports?name=../../etc/passwd", auth=auth).status_code == 404
-    assert client.get("/admin/images/1", auth=auth).status_code == 404
+    assert client.get(f"/admin/reports?name={name}").status_code == 200
+    assert client.get("/admin/reports?name=../../etc/passwd").status_code == 404
+    assert client.get("/admin/images/1").status_code == 404
+
+
+def test_task_endpoints(env):
+    bot, line, client = env
+    assert client.post("/tasks/digest").status_code == 403  # 沒設 TASK_TOKEN 一律拒絕
+    bot.s.task_token = "tok"
+    assert client.post("/tasks/digest", headers={"x-task-token": "bad"}).status_code == 403
+    assert client.post("/tasks/nope", headers={"x-task-token": "tok"}).status_code == 404
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"))
+    r = client.post("/tasks/digest", headers={"x-task-token": "tok"})
+    assert r.status_code == 200 and "回饋日報" in r.json()["summary"]
+    assert r.headers["cache-control"] == "private, no-store"
+    assert bot.db.report_names()
+
+
+def test_admin_behind_firebase_hosting(env):
+    """經過 Firebase Hosting 轉送時，Origin 是對外網域、Host 是 Cloud Run 網址。"""
+    bot, line, client = env
+    bot.s.admin_web_password = "pw"
+    hosting = {"origin": "https://feedback.example.com", "x-forwarded-host": "feedback.example.com",
+               "x-forwarded-proto": "https"}
+    r = client.post("/admin/login", data={"password": "pw"}, headers=hosting, follow_redirects=False)
+    assert r.status_code == 303 and "secure" in r.headers["set-cookie"].lower()
+    assert "httponly" in r.headers["set-cookie"].lower() and "samesite=lax" in r.headers["set-cookie"].lower()
+    other = {"origin": "https://evil.example"}
+    assert client.post("/admin/login", data={"password": "pw"}, headers=other).status_code == 403
+
+
+def test_line_api_failures_do_not_lose_messages(env):
+    bot, line, client = env
+
+    def boom(*a, **k):
+        raise RuntimeError("LINE 暫時連不上")
+
+    line.group_name = boom
+    line.download_content = boom
+    ts = int(datetime(2026, 11, 21, 9, 0, tzinfo=TZ).timestamp() * 1000)
+    post(client, {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GA}})
+    img = text_ev(GA, "U1", "")
+    img["message"] = {"type": "image", "id": "img1"}
+    post(client, img)
+    assert bot.db.group(GA) is not None
+    m = bot.db.messages_page(GA)[0][0]
+    assert m["kind"] == "image" and m["image_ref"] is None

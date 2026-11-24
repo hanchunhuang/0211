@@ -38,25 +38,47 @@ class Commit:
 
 
 class CodeRepo:
-    def __init__(self, path: Path | str, branch: str = "master"):
+    CLONE_DEPTH = 300
+
+    def __init__(self, path: Path | str, branch: str = "master", url: str = ""):
         self.path = Path(path).resolve()
         self.branch = branch
+        self.url = url
         self._knowledge: list[dict] | None = None
+        self._clone_failed = False
 
     # ---------------- 基本 ----------------
     def exists(self) -> bool:
+        """程式庫可用嗎？有設定 url 而本機還沒有時，會先自動 clone（淺層，只取最近的歷史）。"""
+        if (self.path / ".git").exists():
+            return True
+        if self.url and not self._clone_failed:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                r = subprocess.run(["git", "clone", "--quiet", f"--depth={self.CLONE_DEPTH}", "--branch", self.branch,
+                                    self.url, str(self.path)], capture_output=True, text=True, timeout=600)
+                if r.returncode != 0:
+                    # 錯誤訊息可能含網址（裡面有 Token），只記錄前段且遮蔽
+                    log.error("clone 失敗：%s", r.stderr.replace(self.url, "<REPO_URL>")[:300])
+                    self._clone_failed = True
+            except (OSError, subprocess.SubprocessError):
+                log.exception("clone 失敗")
+                self._clone_failed = True
         return (self.path / ".git").exists()
 
     def _git(self, *args: str, check: bool = True, timeout: int = 120) -> str:
         r = subprocess.run(["git", "-C", str(self.path), *args], capture_output=True, text=True,
                            timeout=timeout, encoding="utf-8", errors="replace")
         if check and r.returncode not in (0, 1):  # grep 沒找到回 1
-            raise RuntimeError(f"git {args[0]} 失敗：{r.stderr.strip()[:300]}")
+            err = r.stderr.replace(self.url, "<REPO_URL>") if self.url else r.stderr
+            raise RuntimeError(f"git {args[0]} 失敗：{err.strip()[:300]}")
         return r.stdout
 
     def update(self) -> None:
         """抓最新的遠端分支（唯讀；不保留本機修改）。"""
-        self._git("fetch", "--quiet", "origin", self.branch, timeout=300)
+        shallow = (self.path / ".git" / "shallow").exists()
+        depth = [f"--depth={self.CLONE_DEPTH}"] if shallow else []
+        self._git("fetch", "--quiet", *depth, "origin", self.branch, timeout=300)
         self._git("reset", "--quiet", "--hard", f"origin/{self.branch}")
         self._knowledge = None
 
@@ -67,7 +89,13 @@ class CodeRepo:
     def commits_since(self, since_hash: str | None, max_count: int = 200, days_if_new: int = 3) -> list[Commit]:
         """回傳 since_hash 之後的 commit（舊 → 新）；第一次沒有基準時取最近幾天。"""
         rng = [f"{since_hash}..HEAD"] if since_hash else [f"--since={days_if_new}.days", "HEAD"]
-        hashes = self._git("log", "--no-merges", f"--max-count={max_count}", "--format=%H", *rng).split()
+        try:
+            hashes = self._git("log", "--no-merges", f"--max-count={max_count}", "--format=%H", *rng).split()
+        except RuntimeError:
+            # 上次的 commit 不在目前（淺層）歷史裡：改取最近幾天
+            log.warning("找不到上次處理的 commit %s，改讀最近 %d 天", since_hash, days_if_new)
+            hashes = self._git("log", "--no-merges", f"--max-count={max_count}", "--format=%H",
+                               f"--since={days_if_new}.days", "HEAD").split()
         sep = "\x1f"
         commits = []
         for h in reversed(hashes):

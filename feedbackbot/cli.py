@@ -49,8 +49,8 @@ def main(argv: list[str] | None = None) -> None:
     ctx = commands.Ctx(db=bot.db, line=bot.line, now=bot.now, run_digest=bot.job_digest,
                        run_announce=bot.job_announce, run_sync=bot.job_sync)
     if a.cmd == "digest":
-        res = pipeline.digest(bot.db, bot.llm, bot.s, bot.now(), repo=bot.repo)
-        print(res.admin_summary, f"\n\n日報：{res.report_path}")
+        res = pipeline.digest(bot.db, bot.llm, bot.s, bot.now(), repo=bot.repo, files=bot.files)
+        print(res.admin_summary, f"\n\n日報已存入後台：{res.report_name}")
     elif a.cmd == "sync":
         print(pipeline.sync_commits(bot.db, bot.llm, bot.s, bot.repo, bot.now()).admin_summary)
     elif a.cmd == "announce":
@@ -58,8 +58,8 @@ def main(argv: list[str] | None = None) -> None:
             print(pipeline.sync_commits(bot.db, bot.llm, bot.s, bot.repo, bot.now()).admin_summary, "\n")
         res = pipeline.prepare_announcements(bot.db, bot.llm, bot.s, bot.now())
         print(res.admin_summary)
-        if res.evaluation_path:
-            print(f"\n成效評估：{res.evaluation_path}")
+        if res.evaluation_name:
+            print(f"\n成效評估已存入後台：{res.evaluation_name}")
     elif a.cmd == "send":
         for i, r in pipeline.send_announcements(bot.db, bot.line, bot.now(), a.ids or None):
             print(f"草稿 {i}：{r}")
@@ -81,6 +81,8 @@ if __name__ == "__main__":
 
 def run_check() -> bool:
     """部署後檢查各項設定是否可用。"""
+    from datetime import datetime
+
     import anthropic
     import httpx
 
@@ -129,9 +131,9 @@ def run_check() -> bool:
     if not s.repo_path:
         warn("程式庫", "REPO_PATH 未設定：分析不會查程式碼，也不會自動配對 commit")
     else:
-        repo = CodeRepo(s.repo_path, s.repo_branch)
+        repo = CodeRepo(s.repo_path, s.repo_branch, url=s.repo_url)
         if not repo.exists():
-            line(False, "程式庫", f"{s.repo_path} 不是 git 專案")
+            line(False, "程式庫", f"{s.repo_path} 不是 git 專案" + ("，且用 REPO_URL 自動 clone 失敗（Token 過期或無權限？）" if s.repo_url else ""))
         else:
             try:
                 repo._git("fetch", "--quiet", "origin", s.repo_branch, timeout=120)
@@ -141,15 +143,32 @@ def run_check() -> bool:
             if not (repo.path / s.repo_knowledge_file).exists():
                 warn("知識庫", f"找不到 {s.repo_knowledge_file}，公告的「在哪裡」會較不準")
 
-    # 資料夾
+    # 資料庫與檔案
     try:
         s.ensure_dirs()
-        test = s.data_dir / ".write-test"
-        test.write_text("ok")
-        test.unlink()
-        line(True, "資料夾", f"資料庫 {s.db_path.resolve()}")
-    except OSError as e:
-        line(False, "資料夾", f"無法寫入 {s.data_dir}：{e}")
+        db = s.make_db()
+        db.set_kv("_check", datetime.now().isoformat())
+        where = (f"Firestore（專案 {s.firebase_project_id or '預設'}，集合前綴 {s.firestore_prefix}）"
+                 if s.db_backend == "firestore" else f"SQLite {s.db_path.resolve()}")
+        line(True, "資料庫", f"可讀寫：{where}")
+    except Exception as e:  # noqa: BLE001
+        line(False, "資料庫", f"{s.db_backend} 無法使用：{str(e)[:200]}")
+    try:
+        files = s.make_files()
+        ref = files.save("_check.txt", b"ok", "text/plain")
+        assert files.read(ref) is not None
+        line(True, "截圖儲存", f"Firebase Storage {s.storage_bucket}" if s.storage_bucket else f"本機 {s.images_dir.resolve()}")
+    except Exception as e:  # noqa: BLE001
+        line(False, "截圖儲存", str(e)[:200])
+
+    if s.db_backend == "firestore" and not s.storage_bucket:
+        warn("截圖儲存", "用 Firestore 但沒設 FIREBASE_STORAGE_BUCKET：Cloud Run 上的截圖會在重啟後消失")
+
+    # 排程
+    if not s.enable_scheduler and not s.task_token:
+        line(False, "排程", "ENABLE_SCHEDULER=false 但沒設 TASK_TOKEN，Cloud Scheduler 無法呼叫 /tasks/*")
+    elif not s.enable_scheduler:
+        line(True, "排程", "由外部（Cloud Scheduler）呼叫 /tasks/digest、/tasks/announce")
 
     # 後台與通知
     if not s.admin_web_password:
@@ -157,7 +176,7 @@ def run_check() -> bool:
     elif len(s.admin_web_password) < 12:
         warn("網頁後台", "密碼太短，建議 12 碼以上")
     else:
-        line(True, "網頁後台", f"帳號 {s.admin_web_user}")
+        line(True, "網頁後台", "已設定密碼")
     if s.telegram_bot_token and s.telegram_chat_id:
         line(True, "Telegram 通知", "已設定")
     print("\n" + ("全部檢查通過 🎉" if ok else "有項目需要修正（❌）"))
