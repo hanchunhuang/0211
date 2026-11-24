@@ -1,0 +1,22 @@
+# /etc/systemd/system/feedbackbot.service
+# 讓回饋機器人常駐執行、開機自動啟動、當掉自動重啟。
+[Unit]
+Description=LINE feedback bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=feedbackbot
+Group=feedbackbot
+WorkingDirectory=/srv/feedback-bot/app
+ExecStart=/srv/feedback-bot/app/.venv/bin/python -m feedbackbot serve --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=5
+# 安全強化：只能寫自己的資料夾
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/feedback-bot
+
+[Install]
+WantedBy=multi-user.target

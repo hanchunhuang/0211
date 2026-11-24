@@ -60,6 +60,9 @@ cp .env.example .env        # 填入 LINE、Claude、REPO_PATH 等
 
 ## 四、啟動
 
+**正式部署到主機的完整步驟（Ubuntu + Nginx + HTTPS + systemd + 備份）請看 [DEPLOY.md](DEPLOY.md)。**
+
+
 ```bash
 python -m feedbackbot serve --port 8000
 ```
