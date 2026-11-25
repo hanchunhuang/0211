@@ -14,6 +14,7 @@ HELP = """🛠 管理指令
 /issues　列出未完成問題
 /issue 編號　看問題細節與修改建議
 /system 編號 系統代號　改正問題所屬的系統（/systems 看代號）
+/fix 編號　取得修改指示（可貼給 Claude Code）
 /start 編號　標記為修改中
 /resolve 編號 怎麼改的 | 在哪裡　手動標記完成
 /sync　立即讀取新 commit 並自動配對已修正的問題
@@ -85,6 +86,13 @@ def handle(ctx: Ctx, text: str) -> str:
                 tag = "🔁" if n >= 2 else "👤"
                 lines.append(f"{tag} #{i['id']} [{i['priority'] or '-'}] {i['title']}（{STATUS_ZH.get(i['status'])}，{n}個單位）")
         return "\n".join(lines)
+
+    if cmd == "/fix":
+        iid = _int(rest)
+        if not iid or not db.issue(iid) or ctx.systems is None:
+            return "格式：/fix 問題編號"
+        from .pipeline import fix_prompt
+        return fix_prompt(db, ctx.systems, iid)
 
     if cmd == "/systems":
         if ctx.systems is None:

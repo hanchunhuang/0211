@@ -330,6 +330,48 @@ def resolve_issue(db: DB, issue_id: int, note: str, location: str, now: datetime
     return True
 
 
+def fix_prompt(db: DB, systems: Systems, issue_id: int) -> str:
+    """整理成可以直接貼給 Claude Code（或工程師）的修改指示。"""
+    i = db.issue(issue_id)
+    if not i:
+        return ""
+    sid = i.get("system_id")
+    d = systems.get(sid)
+    kind = "feat" if i["kind"] == "feature" else "fix"
+    lines = [f"請修正「{systems.name(sid)}」的問題 #{i['id']}：{i['title']}"]
+    if d and d.repo:
+        lines.append(f"（程式庫：{d.repo}）")
+    lines += ["", "## 使用者回饋"]
+    for f in db.issue_feedback(issue_id):
+        lines.append(f"- [{db.group_label(f['group_id'])}] {f['reporter'] or ''}：{f['detail']}")
+    lines += ["", "## 問題摘要", i["summary"]]
+    if i.get("analysis"):
+        a = json.loads(i["analysis"])
+        lines += ["", "## 初步分析（由 AI 讀程式碼產生，請以實際程式碼為準）",
+                  f"- 理解：{a['understanding']}", f"- 可能原因：{a['root_cause']}", "- 建議修改："]
+        lines += [f"  {n}. {s}" for n, s in enumerate(a["proposed_changes"], 1)]
+        if a.get("files_to_change"):
+            lines.append("- 可能要改的檔案：")
+            lines += [f"  - {f['path']}：{f['change']}" for f in a["files_to_change"]]
+        if a.get("user_path"):
+            lines.append(f"- 使用者操作位置：{a['user_path']}")
+        if a.get("risks"):
+            lines.append("- 注意風險：" + "；".join(a["risks"]))
+        if a.get("questions_to_confirm"):
+            lines.append("- 尚待使用者確認：" + "；".join(a["questions_to_confirm"]))
+        if a.get("acceptance_checks"):
+            lines += ["", "## 驗收方式"] + [f"- {x}" for x in a["acceptance_checks"]]
+    lines += [
+        "", "## 要求",
+        "1. 先閱讀相關程式碼確認原因；如果上面的分析不正確，以實際程式碼為準並告訴我。",
+        "2. 遵守本專案 CLAUDE.md 的規範。",
+        "3. 修改後執行相關測試，並說明我要怎麼手動驗證。",
+        f"4. commit 訊息用：{kind}: <中文說明> (#{i['id']})",
+        "5. 改完先讓我確認，不要自行 push。",
+    ]
+    return "\n".join(lines)
+
+
 def set_issue_system(db: DB, issue_id: int, system_id: str, now: datetime) -> bool:
     """改正問題所屬的系統；未完成的問題會清掉舊分析，下次整理時用新系統的程式碼重新分析。"""
     i = db.issue(issue_id)

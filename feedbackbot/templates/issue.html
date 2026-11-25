@@ -41,6 +41,17 @@
     </div>
     {% endif %}
 
+    {% if i.status not in ('resolved', 'wontfix') %}
+    <h2>修改指示</h2>
+    <div class="card">
+      <p class="sub" style="margin-top:0">複製下面這段，貼給 Claude Code（在該系統的程式碼資料夾執行 <code>claude</code>）或交給工程師。</p>
+      <textarea id="fixprompt" readonly style="min-height:220px;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace">{{ fix_prompt }}</textarea>
+      <p><button class="primary" type="button" onclick="(function(b){var t=document.getElementById('fixprompt');
+        (navigator.clipboard ? navigator.clipboard.writeText(t.value) : Promise.reject()).then(function(){b.textContent='已複製 ✓'},
+        function(){t.select();document.execCommand('copy');b.textContent='已複製 ✓'});})(this)">複製修改指示</button></p>
+    </div>
+    {% endif %}
+
     <h2>原始訊息</h2>
     <details class="card" {{ 'open' if source | length <= 10 }}><summary class="sub">共 {{ source | length }} 則</summary><div class="scroll">{% if source %}<table>
       {% for m in source %}<tr><td class="sub" style="white-space:nowrap">{{ m.created_at | t }}</td><td>{{ label(m.group_id) }}</td><td style="white-space:nowrap">{{ m.display_name or '' }}</td>

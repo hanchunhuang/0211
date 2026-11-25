@@ -532,3 +532,18 @@ def test_excluded_group_is_not_collected(env):
     client.post(f"/admin/groups/{GA}/exclude", data={"action": "include"}, headers=origin)
     post(client, text_ev(GA, "U1", "匯出還是沒有出貨日期"))
     assert bot.db.count_messages(group_id=GA) == 2
+
+
+def test_fix_prompt(env):
+    bot, line, client = env
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"))
+    pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
+    iid = issue_by_title(bot, "匯出缺出貨日期")["id"]
+    post(client, text_ev(None, ADMIN, f"/fix {iid}"))
+    text = line.replies[-1]
+    assert f"#{iid}" in text and "訂單匯出沒有出貨日期" in text and f"fix: <中文說明> (#{iid})" in text
+    assert "不要自行 push" in text
+    bot.s.admin_web_password = "pw"
+    client.post("/admin/login", data={"password": "pw"}, headers={"origin": "http://testserver"})
+    r = client.get(f"/admin/issues/{iid}")
+    assert "複製修改指示" in r.text and "初步分析" in r.text

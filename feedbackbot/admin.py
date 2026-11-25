@@ -258,7 +258,8 @@ def build_router(get_bot: Callable) -> APIRouter:
         anns = [a for a in db.announcements() if iid in json.loads(a["issue_ids"])]
         return render(request, "issue.html", i=i, by_group=by_group, source=db.messages_by_ids(msg_ids), anns=anns,
                       analysis=json.loads(i["analysis"]) if i.get("analysis") else None,
-                      commits=json.loads(i.get("fix_commits") or "[]"), label=db.group_label)
+                      commits=json.loads(i.get("fix_commits") or "[]"), label=db.group_label,
+                      fix_prompt=pipeline.fix_prompt(db, get_bot().systems, iid))
 
     @r.post("/issues/{iid}/system")
     def issue_system(iid: int, system: str = Form(...)):
