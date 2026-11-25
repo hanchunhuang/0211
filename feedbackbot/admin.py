@@ -206,6 +206,11 @@ def build_router(get_bot: Callable) -> APIRouter:
         bot.db.set_group_systems(gid, chosen)
         return back(f"/admin/groups/{gid}")
 
+    @r.post("/groups/{gid}/mode")
+    def set_mode(gid: str, mode: str = Form(...)):
+        get_bot().db.set_group_mode(gid, mode)
+        return back(f"/admin/groups/{gid}")
+
     @r.post("/groups/{gid}/exclude")
     def set_exclude(gid: str, action: str = Form(...)):
         get_bot().db.set_group_excluded(gid, action == "exclude")

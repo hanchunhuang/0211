@@ -48,6 +48,19 @@ class DB:
             rows = [g for g in rows if g.get("active")]
         return sorted(rows, key=lambda g: g.get("joined_at") or "")
 
+    MODES = ("full", "summary", "off")
+
+    def set_group_mode(self, group_id: str, mode: str) -> bool:
+        """full＝收集＋歸納＋分析；summary＝收集＋歸納、不讀程式碼分析；off＝不收集。"""
+        if mode not in self.MODES or not self.group(group_id):
+            return False
+        self.s.update("groups", group_id, {"excluded": mode == "off", "summary_only": mode == "summary"})
+        return True
+
+    @staticmethod
+    def group_mode(g: dict) -> str:
+        return "off" if g.get("excluded") else ("summary" if g.get("summary_only") else "full")
+
     def set_group_excluded(self, group_id: str, excluded: bool) -> bool:
         """不收集：之後的訊息不記錄、不分析（機器人仍留在群組）。"""
         if not self.group(group_id):

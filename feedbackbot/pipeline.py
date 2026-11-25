@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 RUN_LOCK = threading.Lock()
 
 KIND_ZH = {"bug": "錯誤", "feature": "新需求", "usability": "操作不便", "question": "使用疑問"}
-STATUS_ZH = {"open": "待分析", "analyzed": "已分析", "in_progress": "修改中", "resolved": "已完成", "wontfix": "不處理"}
+STATUS_ZH = {"open": "待分析", "collected": "已歸納", "analyzed": "已分析", "in_progress": "修改中", "resolved": "已完成", "wontfix": "不處理"}
 
 
 def now_in(settings: Settings) -> datetime:
@@ -124,9 +124,16 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
         pending = {i["id"] for i in db.open_issues() if i["status"] == "open" and not i.get("analysis")}
         targets = sorted(touched | pending)
         updated: set[str] = set()
+        summary_groups = {g["id"] for g in db.groups() if g.get("summary_only")}
         for issue_id in targets:
             issue = db.issue(issue_id)
             if issue["status"] in ("resolved", "wontfix", "in_progress"):
+                continue
+            # 只來自「只歸納不分析」群組的問題：不讀程式碼分析
+            gids = set(db.issue_groups(issue_id))
+            if gids and gids <= summary_groups:
+                if issue["status"] == "open":
+                    db.update_issue(issue_id, now, status="collected")
                 continue
             sid = issue.get("system_id") or UNKNOWN
             sys_repo = systems.repo(sid)

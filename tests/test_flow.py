@@ -547,3 +547,27 @@ def test_fix_prompt(env):
     client.post("/admin/login", data={"password": "pw"}, headers={"origin": "http://testserver"})
     r = client.get(f"/admin/issues/{iid}")
     assert "複製修改指示" in r.text and "初步分析" in r.text
+
+
+def test_summary_only_group(env):
+    """「只歸納不分析」：收集並整理成問題，但不讀程式碼分析；有完整模式的群組也反映時才分析。"""
+    bot, line, client = env
+    ts = int(datetime(2026, 11, 21, 9, 0, tzinfo=TZ).timestamp() * 1000)
+    post(client, {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GA}},
+         {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GB}})
+    bot.s.admin_web_password = "pw"
+    origin = {"origin": "http://testserver"}
+    client.post("/admin/login", data={"password": "pw"}, headers=origin)
+    client.post(f"/admin/groups/{GA}/mode", data={"mode": "summary"}, headers=origin)
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"))
+    pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
+    export = issue_by_title(bot, "匯出缺出貨日期")
+    assert export["status"] == "collected" and not export.get("analysis") and bot.llm.analyzed == []
+    assert "只歸納" in client.get("/admin/units").text
+    # 完整模式的群組也反映同一問題 → 這時才分析
+    post(client, text_ev(GB, "U2", "匯出少了出貨日"))
+    pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 22, 23, 30, tzinfo=TZ))
+    assert bot.db.issue(export["id"])["status"] == "analyzed"
+    # 切到不收集
+    client.post(f"/admin/groups/{GA}/mode", data={"mode": "off"}, headers=origin)
+    assert bot.db.is_excluded(GA)

@@ -26,6 +26,7 @@
     {% for g in active %}
     <tr>
       <td class="nowrap"><a href="/admin/groups/{{ g.id }}">{{ g.label }}</a>
+        {% if g.summary_only %} <span class="pill">只歸納</span>{% endif %}
         {% if not g.center_set %} <span class="pill draft">未設定</span>{% endif %}</td>
       <td class="sub">{% if g.systems %}{% for x in g.systems %}<span class="pill" style="margin:1px">{{ sysname(x) }}</span>{% endfor %}{% else %}<span class="pill draft">未設定</span>{% endif %}</td>
       <td class="sub nowrap">{{ g.name or '' }}</td>

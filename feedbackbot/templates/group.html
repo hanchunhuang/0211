@@ -16,15 +16,13 @@
       <input type="text" name="center" value="{{ g.company or '' }}" placeholder="中心名稱" aria-label="中心名稱" required>
       <button>更新</button>
     </form>
-    <form method="post" action="/admin/groups/{{ g.id }}/exclude" style="margin-top:12px">
-      {% if g.excluded %}
-      <p style="margin:0 0 6px;color:var(--warn)"><strong>⏸ 這個群組目前「不收集」</strong>：新訊息不記錄、不分析。</p>
-      <input type="hidden" name="action" value="include"><button class="primary">恢復收集</button>
-      {% else %}
-      <input type="hidden" name="action" value="exclude">
-      <button onclick="return confirm('之後這個群組的訊息都不記錄、不分析（已收集的會保留）。確定？')">不收集這個群組</button>
-      <span class="sub">例如內部測試群、與系統無關的群組</span>
-      {% endif %}
+    {% set mode = 'off' if g.excluded else ('summary' if g.summary_only else 'full') %}
+    <form method="post" action="/admin/groups/{{ g.id }}/mode" style="margin-top:12px">
+      <div class="sub">這個群組的處理方式</div>
+      <label style="display:block;margin-top:4px"><input type="radio" name="mode" value="full" {{ 'checked' if mode == 'full' }}> 完整：收集、歸納，並讀程式碼分析怎麼改</label>
+      <label style="display:block;margin-top:4px"><input type="radio" name="mode" value="summary" {{ 'checked' if mode == 'summary' }}> 只歸納不分析：收集並整理成問題，不讀程式碼、不產生修改建議</label>
+      <label style="display:block;margin-top:4px"><input type="radio" name="mode" value="off" {{ 'checked' if mode == 'off' }}> 不收集：之後的訊息不記錄（已收集的會保留）</label>
+      <button style="margin-top:6px">儲存處理方式</button>
     </form>
     <form method="post" action="/admin/groups/{{ g.id }}/systems" style="margin-top:12px">
       <div class="sub">這個單位使用的系統（AI 會優先從勾選的系統中判斷；都不勾＝從全部系統判斷）</div>
