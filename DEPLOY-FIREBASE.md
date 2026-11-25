@@ -242,11 +242,13 @@ done
 
 ```bash
 cd ~/feedback-bot && git pull
-gcloud run deploy feedbackbot --source . --region $REGION \
+gcloud run deploy feedbackbot --source . --region $REGION --memory 2Gi \
   --update-secrets "REPO_TOKEN_HCARE=repo-token-hcare:latest,REPO_TOKEN_PD_AI=repo-token-pd-ai:latest,REPO_TOKEN_CHILDREN_CARE=repo-token-children-care:latest,REPO_TOKEN_HEALTH_PASSBOOK=repo-token-health-passbook:latest,REPO_TOKEN_PHARMA_JOURNAL=repo-token-pharma-journal:latest"
 ```
 
 日照系統沿用原本的 `repo-url`，不用改。
+記憶體調到 2 GB：Cloud Run 的暫存空間佔用記憶體，多個系統的程式碼（例如 health-passbook 約 300 MB）要放得下。
+還沒有權杖的系統可以先從指令中拿掉，之後再用 `gcloud run services update feedbackbot --region $REGION --update-secrets ...` 補上。
 
 **⑤ 在後台設定每個群組用哪些系統**
 
