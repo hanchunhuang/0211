@@ -155,6 +155,10 @@ class Bot:
             self._run_command(command, reply_token, user_id, chat_id)
             return
 
+        # ---- 設成「不收集」的群組：不記錄 ----
+        if self.db.is_excluded(chat_id):
+            return
+
         # ---- 默默收集 ----
         kind = msg.get("type")
         record = {

@@ -512,3 +512,23 @@ def test_long_command_runs_through_task_endpoint(env, monkeypatch):
     assert "處理中" in line.replies[-1]
     assert called == ["https://feedbackbot-x.a.run.app/tasks/sync"]
     assert any("commit" in t for _, t in line.pushes)   # /tasks/sync 完成後通知管理者
+
+
+def test_excluded_group_is_not_collected(env):
+    bot, line, client = env
+    ts = int(datetime(2026, 11, 21, 9, 0, tzinfo=TZ).timestamp() * 1000)
+    post(client, {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GA}})
+    post(client, text_ev(GA, "U1", "匯出報表沒有出貨日期"))           # 設定前已收集
+    bot.s.admin_web_password = "pw"
+    origin = {"origin": "http://testserver"}
+    client.post("/admin/login", data={"password": "pw"}, headers=origin)
+    client.post(f"/admin/groups/{GA}/exclude", data={"action": "exclude"}, headers=origin)
+    post(client, text_ev(GA, "U1", "匯出又壞了"))                     # 設定後不收集
+    assert bot.db.count_messages(group_id=GA) == 1
+    res = pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
+    assert res.new_feedback == 0 and bot.db.count_messages(unprocessed=True) == 0
+    r = client.get("/admin/units")
+    assert "不收集的群組" in r.text
+    client.post(f"/admin/groups/{GA}/exclude", data={"action": "include"}, headers=origin)
+    post(client, text_ev(GA, "U1", "匯出還是沒有出貨日期"))
+    assert bot.db.count_messages(group_id=GA) == 2

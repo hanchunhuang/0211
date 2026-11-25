@@ -40,6 +40,19 @@
   </table>{% else %}<div class="empty">目前還沒有加入任何群組。在 LINE 把「{{ profile.name }}」邀請進客戶群組即可開始收集。</div>{% endif %}
 </div>
 
+{% if excluded %}
+<h2>不收集的群組</h2>
+<div class="card scroll"><table>
+  <tr><th>中心</th><th>LINE 群組</th><th>加入時間</th><th class="n">之前收集的訊息</th></tr>
+  {% for g in excluded %}
+  <tr><td class="nowrap"><a href="/admin/groups/{{ g.id }}">{{ g.label }}</a> <span class="pill">⏸ 不收集</span></td>
+    <td class="sub nowrap">{{ g.name or '' }}</td><td class="sub nowrap">{{ g.joined_at | t }}</td><td class="n">{{ g.msgs }}</td></tr>
+  {% endfor %}
+</table>
+<p class="sub">機器人仍在這些群組裡，但不記錄、不分析。點進群組可以「恢復收集」。</p>
+</div>
+{% endif %}
+
 {% if left %}
 <h2>已離開的群組</h2>
 <div class="card scroll"><table>

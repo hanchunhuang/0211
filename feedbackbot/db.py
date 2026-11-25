@@ -48,6 +48,17 @@ class DB:
             rows = [g for g in rows if g.get("active")]
         return sorted(rows, key=lambda g: g.get("joined_at") or "")
 
+    def set_group_excluded(self, group_id: str, excluded: bool) -> bool:
+        """不收集：之後的訊息不記錄、不分析（機器人仍留在群組）。"""
+        if not self.group(group_id):
+            return False
+        self.s.update("groups", group_id, {"excluded": bool(excluded)})
+        return True
+
+    def is_excluded(self, group_id: str) -> bool:
+        g = self.group(group_id)
+        return bool(g and g.get("excluded"))
+
     def set_group_systems(self, group_id: str, system_ids: list[str]) -> bool:
         """這個群組使用哪些系統（AI 判斷回饋屬於哪個系統時，優先從這些系統中選）。"""
         if not self.group(group_id):

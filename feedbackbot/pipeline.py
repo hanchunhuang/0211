@@ -93,6 +93,9 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
     with RUN_LOCK:
         # ---- 1. 每個群組各自萃取回饋，並判斷屬於哪個系統 ----
         for group_id, rows in db.unprocessed_messages().items():
+            if db.is_excluded(group_id):
+                db.mark_processed([r["id"] for r in rows])  # 設成不收集之前留下的訊息：不分析
+                continue
             company = db.group_label(group_id)
             transcript, images = _transcript(db, rows, settings.staff_user_ids, files)
             valid_ids = {r["id"] for r in rows}
@@ -483,6 +486,8 @@ def prepare_announcements(db: DB, llm: LLM, settings: Settings, now: datetime | 
 
         # ---- 每個群組各自的修正公告 ----
         for g in db.groups(active_only=True):
+            if g.get("excluded"):
+                continue
             done = db.announced_issue_ids(g["id"])
             todo = [i for i in db.issues_for_group(g["id"]) if i["status"] == "resolved" and i["id"] not in done]
             if not todo:

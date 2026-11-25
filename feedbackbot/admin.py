@@ -171,10 +171,12 @@ def build_router(get_bot: Callable) -> APIRouter:
         bot = get_bot()
         db = bot.db
         rows = group_stats(Snapshot(db), db, bot.now())
-        active = [g for g in rows if g.get("active")]
+        active = [g for g in rows if g.get("active") and not g.get("excluded")]
+        excluded = [g for g in rows if g.get("active") and g.get("excluded")]
         left = [g for g in rows if not g.get("active")]
         unset = [g for g in active if not g.get("center_set")]
-        return render(request, "units.html", profile=bot.bot_profile(), active=active, left=left, unset=unset)
+        return render(request, "units.html", profile=bot.bot_profile(), active=active, left=left, unset=unset,
+                      excluded=excluded)
 
     # ------------------------------------------------------------ 群組
     @r.get("/groups/{gid}", response_class=HTMLResponse)
@@ -202,6 +204,11 @@ def build_router(get_bot: Callable) -> APIRouter:
         form = await request.form()
         chosen = [x for x in form.getlist("systems") if bot.systems.valid(x)]
         bot.db.set_group_systems(gid, chosen)
+        return back(f"/admin/groups/{gid}")
+
+    @r.post("/groups/{gid}/exclude")
+    def set_exclude(gid: str, action: str = Form(...)):
+        get_bot().db.set_group_excluded(gid, action == "exclude")
         return back(f"/admin/groups/{gid}")
 
     @r.post("/groups/{gid}/center")
@@ -375,7 +382,7 @@ def overview_tiles(data: Snapshot, db, now: datetime, group: str = "") -> dict:
         unannounced += sum(1 for i in data.issues if i["id"] in mine and i["status"] == "resolved" and i["id"] not in done)
     fb = [f for f in data.feedback if not group or f["group_id"] == group]
     return {
-        "groups": sum(1 for g in data.groups if g.get("active")),
+        "groups": sum(1 for g in data.groups if g.get("active") and not g.get("excluded")),
         "msgs7": db.count_messages(since=week, group_id=group or None),
         "fb7": sum(1 for f in fb if f["digest_date"] >= week_date),
         "open": len(open_issues), "common": common, "single": len(open_issues) - common,
