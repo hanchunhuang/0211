@@ -113,10 +113,11 @@ class Bot:
         if etype == "join" and chat_id:
             name = self._group_name(chat_id) if src.get("groupId") else None
             self.db.upsert_group(chat_id, ts, name)
-            self.notify_admins(f"🤖 回饋收集機器人已加入群組「{name or chat_id}」。請在該群組輸入 /center 中心名稱 設定對應的中心。")
+            where = f"{self.s.public_base_url}/admin/groups/{chat_id}" if self.s.public_base_url else "後台「單位」頁"
+            self.notify_admins(f"🤖 已加入群組「{name or chat_id[-8:]}」，開始收集。\n請設定這個群組對應的中心名稱：{where}\n（在後台設定，群組裡不會出現任何訊息）")
             return
         if etype == "leave" and chat_id:
-            self.db.deactivate_group(chat_id)
+            self.db.deactivate_group(chat_id, ts)
             return
         if etype != "message":
             return
@@ -172,6 +173,22 @@ class Bot:
         elif kind == "file":
             self.db.add_message(kind="file", text=msg.get("fileName"), **record)
         # 貼圖、影片、語音等不收
+
+    def bot_profile(self) -> dict:
+        """機器人在 LINE 上的名稱與頭像（快取 1 小時）。"""
+        import time
+
+        cached = getattr(self, "_profile", None)
+        if cached and time.time() - cached[0] < 3600:
+            return cached[1]
+        try:
+            info = self.line.bot_info()
+            prof = {"name": info.get("displayName") or "回饋收集機器人", "picture": info.get("pictureUrl"),
+                    "basic_id": info.get("basicId")}
+        except Exception:  # noqa: BLE001
+            prof = {"name": "回饋收集機器人", "picture": None, "basic_id": None}
+        self._profile = (time.time(), prof)
+        return prof
 
     def _group_name(self, chat_id: str) -> str | None:
         try:

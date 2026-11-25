@@ -380,3 +380,22 @@ def test_line_api_failures_do_not_lose_messages(env):
     assert bot.db.group(GA) is not None
     m = bot.db.messages_page(GA)[0][0]
     assert m["kind"] == "image" and m["image_ref"] is None
+
+
+def test_units_page(env):
+    bot, line, client = env
+    ts = int(datetime(2026, 11, 21, 9, 0, tzinfo=TZ).timestamp() * 1000)
+    post(client, {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GA}},
+         {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GB}})
+    line.bot_info = lambda: {"displayName": "福氣工程師 David", "basicId": "@abc"}
+    bot.s.admin_web_password = "pw"
+    client.post("/admin/login", data={"password": "pw"}, headers={"origin": "http://testserver"})
+    r = client.get("/admin/units")
+    assert "福氣工程師 David" in r.text and "2</div><div class=\"k\">未設定中心名稱" in r.text
+    client.post(f"/admin/groups/{GA}/center", data={"center": "椰子園"}, headers={"origin": "http://testserver"})
+    assert bot.db.group(GA)["center_set"] is True
+    post(client, {"type": "leave", "timestamp": ts, "source": {"type": "group", "groupId": GB}})
+    r = client.get("/admin/units")
+    assert "已離開的群組" in r.text and "椰子園" in r.text
+    assert "1</div><div class=\"k\">收集中的單位" in r.text
+    assert any("開始收集" in t for _, t in line.pushes)

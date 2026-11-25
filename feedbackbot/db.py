@@ -31,7 +31,7 @@ class DB:
     def upsert_group(self, group_id: str, now: datetime, name: str | None = None) -> None:
         cur = self.s.get("groups", group_id)
         if cur:
-            fields: dict[str, Any] = {"active": True}
+            fields: dict[str, Any] = {"active": True, "left_at": None}
             if name:
                 fields["name"] = name
             self.s.update("groups", group_id, fields)
@@ -54,12 +54,12 @@ class DB:
     def set_group_company(self, group_id: str, company: str) -> bool:
         if not self.group(group_id):
             return False
-        self.s.update("groups", group_id, {"company": company})
+        self.s.update("groups", group_id, {"company": company, "center_set": True})
         return True
 
-    def deactivate_group(self, group_id: str) -> None:
+    def deactivate_group(self, group_id: str, now: datetime | None = None) -> None:
         if self.group(group_id):
-            self.s.update("groups", group_id, {"active": False})
+            self.s.update("groups", group_id, {"active": False, "left_at": now.isoformat() if now else None})
 
     def group_label(self, group_id: str) -> str:
         g = self.group(group_id) if group_id else None

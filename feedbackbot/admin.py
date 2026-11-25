@@ -162,6 +162,17 @@ def build_router(get_bot: Callable) -> APIRouter:
                       tiles=overview_tiles(data, db, now, group), series=daily_feedback(data, db, now, days, group),
                       kinds=kind_breakdown(data, group), group_label=db.group_label(group) if group else "")
 
+    # ------------------------------------------------------------ 負責單位
+    @r.get("/units", response_class=HTMLResponse)
+    def units(request: Request):
+        bot = get_bot()
+        db = bot.db
+        rows = group_stats(Snapshot(db), db, bot.now())
+        active = [g for g in rows if g.get("active")]
+        left = [g for g in rows if not g.get("active")]
+        unset = [g for g in active if not g.get("center_set")]
+        return render(request, "units.html", profile=bot.bot_profile(), active=active, left=left, unset=unset)
+
     # ------------------------------------------------------------ 群組
     @r.get("/groups/{gid}", response_class=HTMLResponse)
     def group_detail(request: Request, gid: str, page: int = 1):

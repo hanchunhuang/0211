@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}負責單位｜回饋後台{% endblock %}
+{% block body %}
+<div class="card" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+  {% if profile.picture %}<img src="{{ profile.picture }}" alt="" width="56" height="56" style="border-radius:50%">{% endif %}
+  <div>
+    <div class="sub">回饋收集機器人</div>
+    <div style="font-size:20px;font-weight:700">{{ profile.name }}</div>
+    {% if profile.basic_id %}<div class="sub">LINE ID：{{ profile.basic_id }}</div>{% endif %}
+  </div>
+  <div style="margin-left:auto;display:flex;gap:24px">
+    <div><div class="tile"><div class="v">{{ active | length }}</div><div class="k">收集中的單位</div></div></div>
+    {% if unset %}<div><div class="tile"><div class="v" style="color:var(--warn)">{{ unset | length }}</div><div class="k">未設定中心名稱</div></div></div>{% endif %}
+  </div>
+</div>
+
+{% if unset %}
+<p class="sub" style="margin-top:12px">⚠️ 有 {{ unset | length }} 個群組還沒設定中心名稱（目前暫用 LINE 群組名稱）。點進群組，在右上角輸入中心名稱即可，群組裡不會出現任何訊息。</p>
+{% endif %}
+
+<h2>{{ profile.name }} 負責收集的單位</h2>
+<div class="card scroll">
+  {% if active %}<table>
+    <tr><th>中心</th><th>LINE 群組</th><th>加入時間</th><th class="n">訊息（7天／全部）</th><th class="n">回饋</th>
+      <th class="n">未完成問題</th><th class="n">已修正</th><th>最後訊息</th></tr>
+    {% for g in active %}
+    <tr>
+      <td class="nowrap"><a href="/admin/groups/{{ g.id }}">{{ g.label }}</a>
+        {% if not g.center_set %} <span class="pill draft">未設定</span>{% endif %}</td>
+      <td class="sub nowrap">{{ g.name or '' }}</td>
+      <td class="sub nowrap">{{ g.joined_at | t }}</td>
+      <td class="n">{{ g.msgs7 }}／{{ g.msgs }}</td>
+      <td class="n">{{ g.fb }}</td>
+      <td class="n"><a href="/admin/issues?group={{ g.id }}">{{ g.open_issues }}</a></td>
+      <td class="n">{{ g.resolved }}</td>
+      <td class="sub nowrap">{{ g.last_msg | t or '（尚無訊息）' }}</td>
+    </tr>
+    {% endfor %}
+  </table>{% else %}<div class="empty">目前還沒有加入任何群組。在 LINE 把「{{ profile.name }}」邀請進客戶群組即可開始收集。</div>{% endif %}
+</div>
+
+{% if left %}
+<h2>已離開的群組</h2>
+<div class="card scroll"><table>
+  <tr><th>中心</th><th>LINE 群組</th><th>加入時間</th><th>離開時間</th><th class="n">收集的訊息</th><th class="n">回饋</th></tr>
+  {% for g in left %}
+  <tr><td class="nowrap"><a href="/admin/groups/{{ g.id }}">{{ g.label }}</a></td><td class="sub nowrap">{{ g.name or '' }}</td>
+    <td class="sub nowrap">{{ g.joined_at | t }}</td><td class="sub nowrap">{{ g.left_at | t }}</td>
+    <td class="n">{{ g.msgs }}</td><td class="n">{{ g.fb }}</td></tr>
+  {% endfor %}
+</table>
+<p class="sub">已離開的群組資料仍保留，可以點進去查看過去的訊息與回饋。</p>
+</div>
+{% endif %}
+{% endblock %}

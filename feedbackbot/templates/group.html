@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ label }}｜回饋後台{% endblock %}
 {% block body %}
-<p class="sub"><a href="/admin">總覽</a> ／ 群組</p>
+<p class="sub"><a href="/admin/units">單位</a> ／ 群組</p>
 <h1>{{ label }}</h1>
 <div class="grid2">
   <div class="tiles">
@@ -16,6 +16,7 @@
       <input type="text" name="center" value="{{ g.company or '' }}" placeholder="中心名稱" aria-label="中心名稱" required>
       <button>更新</button>
     </form>
+    {% if not g.center_set %}<p class="sub" style="color:var(--warn);margin:6px 0 0">尚未設定中心名稱，目前暫用 LINE 群組名稱。</p>{% endif %}
   </div>
 </div>
 

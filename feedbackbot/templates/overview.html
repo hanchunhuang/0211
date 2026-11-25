@@ -64,7 +64,7 @@
       <th class="n">未完成</th><th class="n">已修正</th><th>最後訊息</th></tr>
     {% for g in groups %}
     <tr>
-      <td class="nowrap"><a href="/admin/groups/{{ g.id }}">{{ g.label }}</a>{% if not g.active %} <span class="pill">已離開</span>{% endif %}</td>
+      <td class="nowrap"><a href="/admin/groups/{{ g.id }}">{{ g.label }}</a>{% if not g.active %} <span class="pill">已離開</span>{% elif not g.center_set %} <span class="pill draft">未設定</span>{% endif %}</td>
       <td class="sub nowrap">{{ g.name or '' }}</td>
       <td class="n">{{ g.msgs7 }}／{{ g.msgs }}</td>
       <td class="n">{{ g.fb }}</td>

@@ -59,6 +59,12 @@ class LineClient:
             r = self.http.post(f"{API}/message/push", json={"to": to, "messages": batch})
             r.raise_for_status()
 
+    def bot_info(self) -> dict:
+        """機器人自己的資料（顯示名稱、頭像）。"""
+        r = self.http.get(f"{API}/info")
+        r.raise_for_status()
+        return r.json()
+
     def group_name(self, group_id: str) -> str | None:
         r = self.http.get(f"{API}/group/{group_id}/summary")
         return r.json().get("groupName") if r.status_code == 200 else None
