@@ -221,10 +221,10 @@ def test_full_daily_cycle(env):
     assert ann2.draft_ids == []
 
 
-def test_non_admin_dm_is_silent(env):
+def test_non_admin_dm_gets_notice(env):
     _, line, client = env
     post(client, text_ev(None, "U1", "/issues"))
-    assert line.replies == []
+    assert "僅供管理者使用" in line.replies[-1] and "沒有未完成" not in line.replies[-1]
     post(client, text_ev(None, "U1", "/whoami"))
     assert "U1" in line.replies[-1]
 
@@ -478,3 +478,14 @@ def test_multiple_systems(env, tmp_path):
     assert bot.db.issue(stock["id"])["system_id"] == "pharma"
     client.post(f"/admin/groups/{GB}/systems", data={"systems": ["pharma", "nope"]}, headers=origin)
     assert bot.db.group(GB)["systems"] == ["pharma"]
+
+
+def test_direct_message_feedback(env):
+    """私訊時一定有回應：非管理者會被告知、管理者打錯會提示，全形斜線也能用。"""
+    bot, line, client = env
+    post(client, text_ev(None, "Ustranger", "/sync"))
+    assert "僅供管理者使用" in line.replies[-1]
+    post(client, text_ev(None, ADMIN, "早安"))
+    assert "/help" in line.replies[-1]
+    post(client, text_ev(None, ADMIN, " ／issues "))
+    assert "沒有未完成的問題" in line.replies[-1]

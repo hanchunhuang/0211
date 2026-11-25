@@ -124,15 +124,22 @@ class Bot:
         msg = ev["message"]
         user_id = src.get("userId")
         text = msg.get("text", "") if msg.get("type") == "text" else ""
+        command = _as_command(text)
         is_admin = user_id in self.s.admin_user_ids
         reply_token = ev.get("replyToken")
 
         # ---- 1 對 1 私訊：只處理管理者指令 ----
         if src.get("type") == "user":
-            if text.strip().lower() == "/whoami":
+            if command and command.split()[0].lower() == "/whoami":
                 self.line.reply(reply_token, f"你的 userId：{user_id}")
-            elif is_admin and text.startswith("/"):
-                self._run_command(text, reply_token, user_id, None)
+            elif is_admin and command:
+                self._run_command(command, reply_token, user_id, None)
+            elif is_admin and text:
+                self.line.reply(reply_token, "我只看得懂指令喔，輸入 /help 查看可以用的指令。")
+            elif text:
+                log.info("非管理者私訊（%s）", (user_id or "")[-6:])
+                self.line.reply(reply_token, "這個帳號是系統回饋收集機器人，僅供管理者使用。\n"
+                                             "管理者請輸入 /whoami 取得 userId，並設定到 ADMIN_USER_IDS。")
             return
 
         if not chat_id:
@@ -142,8 +149,8 @@ class Bot:
             self.db.upsert_group(chat_id, ts, name)
 
         # ---- 群組內管理者指令（不收進回饋）----
-        if is_admin and text.startswith("/"):
-            self._run_command(text, reply_token, user_id, chat_id)
+        if is_admin and command:
+            self._run_command(command, reply_token, user_id, chat_id)
             return
 
         # ---- 默默收集 ----
@@ -295,6 +302,14 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
         return {"ok": True}  # LINE 要求盡快回 200
 
     return api
+
+
+def _as_command(text: str) -> str:
+    """把「/指令」或全形「／指令」整理成標準格式；不是指令就回傳空字串。"""
+    t = (text or "").strip()
+    if t.startswith("／"):
+        t = "/" + t[1:]
+    return t if t.startswith("/") and len(t) > 1 else ""
 
 
 def _safe_handle(bot: Bot, ev: dict) -> None:
