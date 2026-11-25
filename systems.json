@@ -1,0 +1,49 @@
+[
+  {
+    "id": "daycare",
+    "name": "福氣智慧照顧系統（日照／居服／A個管）",
+    "description": "長照機構管理系統：個案管理、照顧計畫、服務紀錄、排班打卡、聯絡簿、評估量表、健康紀錄、帳單收費、出勤請假薪資、申報與統計報表、公文、財物、形象官網、LINE 客服機器人滿福寶。",
+    "repo": "hokiya/line-hokiya-survey",
+    "branch": "master",
+    "knowledge_file": "database/seeders/support_bot_knowledge.json",
+    "context_docs": ["CLAUDE.md", "docs/handover/AI_ONBOARDING.md"],
+    "keywords": ["日照", "居服", "A個管", "個案", "服務紀錄", "排班", "打卡", "申報", "聯絡簿", "帳單", "薪資"]
+  },
+  {
+    "id": "hcare",
+    "name": "Hcare",
+    "description": "Hcare 系統。",
+    "repo": "becca0330/hcare",
+    "branch": "master",
+    "keywords": ["Hcare"]
+  },
+  {
+    "id": "pd_ai",
+    "name": "處方箋系統（PD AI）",
+    "description": "處方箋相關系統，使用 Hcare 的資料庫。",
+    "repo": "becca0330/pd-ai-system",
+    "branch": "master",
+    "keywords": ["處方箋", "藥單", "PD"]
+  },
+  {
+    "id": "children_care",
+    "name": "兒童之家系統",
+    "description": "兒童照顧機構使用的系統（南老兒童之家）。",
+    "repo": "hokiya/children-care",
+    "keywords": ["兒童", "兒童之家", "南老"]
+  },
+  {
+    "id": "health_passbook",
+    "name": "健康存摺（三生三化）",
+    "description": "勝利之家「三生三化」使用的健康存摺系統。",
+    "repo": "hokiya/health-passbook",
+    "keywords": ["健康存摺", "三生三化", "勝利之家"]
+  },
+  {
+    "id": "pharma_journal",
+    "name": "藥師雜誌",
+    "description": "藥師雜誌網站／系統。",
+    "repo": "hokiya/pharma-journal",
+    "keywords": ["藥師雜誌", "雜誌", "文章"]
+  }
+]

@@ -5,6 +5,7 @@
 <h1>#{{ i.id }} {{ i.title }}</h1>
 <p><span class="pill {{ i.status }}">{{ STATUS_ZH.get(i.status) }}</span>
   <span class="pill {{ i.priority }}">{{ i.priority or '-' }}</span>
+  <span class="pill common">{{ sysname(i.system_id) }}</span>
   <span class="pill">{{ KIND_ZH.get(i.kind, i.kind) }}</span>
   {% if by_group | length >= 2 %}<span class="pill common">共同問題：{{ by_group | length }} 家中心</span>{% else %}<span class="pill">單一中心</span>{% endif %}
   <span class="sub">模組：{{ i.module or '-' }}　建立 {{ i.created_at | t }}</span></p>
@@ -70,6 +71,16 @@
           <button name="action" value="wontfix">不處理</button>
         </form>
       {% endif %}
+    </div>
+    <div class="card" style="margin-top:12px">
+      <strong>所屬系統</strong>
+      <form method="post" action="/admin/issues/{{ i.id }}/system" style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+        <select name="system" aria-label="所屬系統">
+          {% for sid, sname in sys_options %}<option value="{{ sid }}" {{ 'selected' if i.system_id == sid }}>{{ sname }}</option>{% endfor %}
+        </select>
+        <button>改系統</button>
+      </form>
+      <p class="sub" style="margin:6px 0 0">AI 判斷錯時可改。改了之後，下次整理會用新系統的程式碼重新分析。</p>
     </div>
     <div class="card" style="margin-top:12px">
       <strong>公告紀錄</strong>

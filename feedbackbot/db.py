@@ -48,6 +48,13 @@ class DB:
             rows = [g for g in rows if g.get("active")]
         return sorted(rows, key=lambda g: g.get("joined_at") or "")
 
+    def set_group_systems(self, group_id: str, system_ids: list[str]) -> bool:
+        """這個群組使用哪些系統（AI 判斷回饋屬於哪個系統時，優先從這些系統中選）。"""
+        if not self.group(group_id):
+            return False
+        self.s.update("groups", group_id, {"systems": list(system_ids)})
+        return True
+
     def find_group_by_suffix(self, code: str) -> dict | None:
         return next((g for g in self.groups() if code and g["id"].endswith(code)), None)
 
@@ -150,10 +157,12 @@ class DB:
     def issue(self, issue_id: int) -> dict | None:
         return self.s.get("issues", int(issue_id)) if issue_id else None
 
-    def create_issue(self, title: str, kind: str, summary: str, module: str | None, now: datetime) -> int:
+    def create_issue(self, title: str, kind: str, summary: str, module: str | None, now: datetime,
+                     system_id: str = "unknown") -> int:
         iid = self.s.next_id("issues")
         self.s.set("issues", iid, {
-            "id": iid, "title": title, "kind": kind, "summary": summary, "module": module, "status": "open",
+            "id": iid, "system_id": system_id, "title": title, "kind": kind, "summary": summary, "module": module,
+            "status": "open",
             "priority": None, "analysis": None, "resolution_note": None, "resolution_location": None,
             "resolved_at": None, "fix_commits": None, "auto_resolved": 0,
             "created_at": now.isoformat(), "updated_at": now.isoformat(),
@@ -183,10 +192,11 @@ class DB:
 
     # ================================================================ feedback
     def add_feedback(self, *, group_id: str, message_ids: list[int], reporter: str | None, kind: str,
-                     title: str, detail: str, severity: str | None, digest_date: str, now: datetime) -> int:
+                     title: str, detail: str, severity: str | None, digest_date: str, now: datetime,
+                     system_id: str = "unknown") -> int:
         fid = self.s.next_id("feedback")
         self.s.set("feedback", fid, {
-            "id": fid, "group_id": group_id, "issue_id": None, "message_ids": json.dumps(message_ids),
+            "id": fid, "group_id": group_id, "issue_id": None, "system_id": system_id, "message_ids": json.dumps(message_ids),
             "reporter": reporter, "kind": kind, "title": title, "detail": detail, "severity": severity,
             "digest_date": digest_date, "created_at": now.isoformat(),
         })

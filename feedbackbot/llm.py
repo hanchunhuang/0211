@@ -29,6 +29,7 @@ class ExtractedFeedback(BaseModel):
     title: str = Field(description="15 字內的問題標題")
     detail: str = Field(description="具體描述：在哪個功能、做了什麼、預期 vs 實際、影響。只寫訊息中有的資訊")
     severity: Literal["high", "medium", "low"]
+    system: str = Field(description="這則回饋屬於哪個系統：填系統清單中的代號；無法判斷就填 unknown")
 
 
 class Extraction(BaseModel):
@@ -104,11 +105,13 @@ class EvaluationReport(BaseModel):
 
 
 class LLM(Protocol):
-    def extract(self, company: str, transcript: str, images: list[tuple[int, bytes, str]]) -> Extraction: ...
+    def extract(self, company: str, transcript: str, images: list[tuple[int, bytes, str]],
+                systems_catalog: str = "") -> Extraction: ...
     def cluster(self, open_issues: list[dict], new_feedback: list[dict]) -> Clustering: ...
-    def analyze(self, issue: dict, feedback: list[dict], system_context: str, repo=None) -> Analysis: ...
+    def analyze(self, issue: dict, feedback: list[dict], system_context: str, repo=None,
+                knowledge_file: str | None = None) -> Analysis: ...
     def match_commits(self, open_issues: list[dict], commits: list[dict], system_context: str,
-                      repo=None) -> CommitMatching: ...
+                      repo=None, knowledge_file: str | None = None) -> CommitMatching: ...
     def evaluate(self, resolved: list[dict]) -> EvaluationReport: ...
     def announcement(self, company: str, items: list[dict]) -> str: ...
 
@@ -158,9 +161,10 @@ class ClaudeLLM:
             raise RuntimeError(f"Claude 拒絕處理此請求（request_id={resp._request_id}）")
         return "".join(b.text for b in resp.content if b.type == "text").strip()
 
-    def _agent(self, system: str, content: str, schema: type[BaseModel], effort: str, repo, max_iterations: int = 16):
+    def _agent(self, system: str, content: str, schema: type[BaseModel], effort: str, repo, max_iterations: int = 16,
+               knowledge_file: str | None = None):
         """讓 Claude 用唯讀工具查程式碼後，輸出結構化結果。"""
-        tools = _repo_tools(repo, self.knowledge_file)
+        tools = _repo_tools(repo, self.knowledge_file if knowledge_file is None else knowledge_file)
         runner = self.client.beta.messages.tool_runner(
             model=self.model,
             max_tokens=16000,
@@ -188,11 +192,13 @@ class ClaudeLLM:
         return parsed
 
     # -- 1. 萃取回饋 --
-    def extract(self, company: str, transcript: str, images: list[tuple[int, bytes, str]]) -> Extraction:
+    def extract(self, company: str, transcript: str, images: list[tuple[int, bytes, str]],
+                systems_catalog: str = "") -> Extraction:
         system = (
-            "你是軟體產品的客服分析師。開發者把一套長照管理系統（多租戶 SaaS）提供給多家長照中心使用，"
-            "並在各中心的 LINE 群組裡收集使用者意見（群組內也有客服機器人「滿福寶」與客服人員在回答操作問題）。"
-            "你的工作是從群組聊天紀錄中，找出和『這套系統』有關的錯誤回報、功能需求、操作不便、使用疑問。\n"
+            "你是軟體產品的客服分析師。開發者提供多套系統（例如長照管理、兒童之家、處方箋、健康存摺、藥師雜誌）"
+            "給多個單位使用，並在各單位的 LINE 群組裡收集使用者意見（群組內也可能有客服機器人「滿福寶」與客服人員在回答操作問題）。"
+            "你的工作是從群組聊天紀錄中，找出和『這些系統』有關的錯誤回報、功能需求、操作不便、使用疑問，"
+            "並判斷每一筆屬於哪個系統（依提到的功能、畫面、用詞判斷；看不出來就填 unknown）。\n"
             "規則：\n"
             "- 忽略閒聊、問候、與系統無關的中心內部事務（排班協調、個案照顧討論等）。\n"
             "- 已被客服人員或滿福寶當場解答、且使用者接受的單純操作問題可忽略；"
@@ -212,14 +218,17 @@ class ClaudeLLM:
                 content.append(data)
         content.append({
             "type": "text",
-            "text": f"中心：{company}\n<messages>\n{transcript}\n</messages>\n請列出其中的系統回饋。",
+            "text": (f"中心：{company}\n"
+                     + (f"<systems>\n這個單位使用的系統（system 欄位填其中的代號）：\n{systems_catalog}\n</systems>\n"
+                        if systems_catalog else "")
+                     + f"<messages>\n{transcript}\n</messages>\n請列出其中的系統回饋，並判斷每一筆屬於哪個系統。"),
         })
         return self._parse(system, content, Extraction, effort="medium")
 
     # -- 2. 跨群組歸類 --
     def cluster(self, open_issues: list[dict], new_feedback: list[dict]) -> Clustering:
         system = (
-            "你負責把多家長照中心回報的系統問題去重與歸類。\n"
+            "你負責把多個單位回報的同一套系統的問題去重與歸類。\n"
             "- 若新回饋描述的是和某個既有問題『同一個根本問題或同一個需求』，歸入該問題（issue_id 填既有編號）。\n"
             "- 若多筆新回饋彼此是同一件事（即使來自不同中心、說法不同），請歸到同一個新問題 key。\n"
             "- 只是同模組但不同問題，不要合併。\n"
@@ -230,9 +239,10 @@ class ClaudeLLM:
         return self._parse(system, f"<data>\n{data}\n</data>", Clustering, effort="high")
 
     # -- 3. 修改分析 --
-    def analyze(self, issue: dict, feedback: list[dict], system_context: str, repo=None) -> Analysis:
+    def analyze(self, issue: dict, feedback: list[dict], system_context: str, repo=None,
+                knowledge_file: str | None = None) -> Analysis:
         system = (
-            "你是這套長照管理系統的資深工程師兼產品經理，負責為多中心共用的系統規劃修改。\n"
+            "你是這個系統的資深工程師兼產品經理（系統是哪一套見 system_context），負責為多個單位共用的系統規劃修改。\n"
             "請根據使用者回饋與系統說明，提出具體、可執行的修改建議：\n"
             "- 若有程式碼工具，先用 search_code／list_files／read_file 找到相關的 Controller、Service、Model、"
             "blade、路由，確認現在的行為，再在 files_to_change 寫出要改的檔案與改法；不要臆測不存在的檔案。\n"
@@ -246,16 +256,16 @@ class ClaudeLLM:
         data = json.dumps({"issue": issue, "feedback": feedback}, ensure_ascii=False, indent=1)
         content = f"<data>\n{data}\n</data>"
         if repo is not None and repo.exists():
-            return self._agent(system, content, Analysis, effort="high", repo=repo)
+            return self._agent(system, content, Analysis, effort="high", repo=repo, knowledge_file=knowledge_file)
         return self._parse(system, content, Analysis, effort="high")
 
     # -- 3b. commit 配對 --
     def match_commits(self, open_issues: list[dict], commits: list[dict], system_context: str,
-                      repo=None) -> CommitMatching:
+                      repo=None, knowledge_file: str | None = None) -> CommitMatching:
         system = (
             "你負責判斷開發者最近的 commit 解決了哪些使用者回報的問題。\n"
             "- 只有 commit 的實際內容確實處理了該問題時才配對；同模組但不同問題不要配。必要時用 show_commit 看 diff。\n"
-            "- how_fixed 用使用者（長照中心的行政／照服員）聽得懂的話寫，不要寫程式名詞。\n"
+            "- how_fixed 用使用者（各單位的行政人員、照服員、藥師等）聽得懂的話寫，不要寫程式名詞。\n"
             "- where 寫使用者在系統哪裡看得到，可用 search_knowledge 查選單路徑；查不到就依 commit 內容推斷選單位置。\n"
             "- 沒有任何配對就回傳空陣列。用繁體中文。\n" + SAFETY
             + f"\n\n<system_context>\n{system_context}\n</system_context>"
@@ -263,7 +273,7 @@ class ClaudeLLM:
         data = json.dumps({"open_issues": open_issues, "commits": commits}, ensure_ascii=False, indent=1)
         content = f"<data>\n{data}\n</data>"
         if repo is not None and repo.exists():
-            return self._agent(system, content, CommitMatching, effort="high", repo=repo)
+            return self._agent(system, content, CommitMatching, effort="high", repo=repo, knowledge_file=knowledge_file)
         return self._parse(system, content, CommitMatching, effort="high")
 
     # -- 4. 成效評估 --
@@ -278,7 +288,7 @@ class ClaudeLLM:
     # -- 5. 群組公告 --
     def announcement(self, company: str, items: list[dict]) -> str:
         system = (
-            "你要寫一則 LINE 群組公告，告訴某家長照中心的同仁：他們先前在群組反映的系統問題已經修改完成。\n"
+            "你要寫一則 LINE 群組公告，告訴某個單位的同仁：他們先前在群組反映的系統問題已經修改完成。\n"
             "格式要求：\n"
             "- 純文字（LINE 不支援 Markdown，不要用 **、#、表格）。可用少量 emoji 與「1.」「•」條列。\n"
             "- 開頭一句簡短問候與說明；每個項目寫：原本的問題（用使用者聽得懂的話）、怎麼改、在哪裡可以看到/操作（路徑）。\n"

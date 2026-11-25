@@ -117,7 +117,9 @@ def build_router(get_bot: Callable) -> APIRouter:
     r = APIRouter(prefix="/admin", dependencies=[Depends(auth)])
 
     def render(request: Request, template: str, **ctx) -> HTMLResponse:
-        return TEMPLATES.TemplateResponse(request, template, {"nav": template.split(".")[0], **ctx})
+        systems = get_bot().systems
+        return TEMPLATES.TemplateResponse(request, template, {
+            "nav": template.split(".")[0], "sysname": systems.name, "sys_options": systems.options(), **ctx})
 
     def back(url: str) -> RedirectResponse:
         return RedirectResponse(url, status_code=303)
@@ -160,7 +162,8 @@ def build_router(get_bot: Callable) -> APIRouter:
         data = Snapshot(db)
         return render(request, "overview.html", groups=group_stats(data, db, now), group=group, days=days,
                       tiles=overview_tiles(data, db, now, group), series=daily_feedback(data, db, now, days, group),
-                      kinds=kind_breakdown(data, group), group_label=db.group_label(group) if group else "")
+                      kinds=kind_breakdown(data, group), group_label=db.group_label(group) if group else "",
+                      by_system=system_breakdown(data, bot.systems, group))
 
     # ------------------------------------------------------------ 負責單位
     @r.get("/units", response_class=HTMLResponse)
@@ -193,6 +196,14 @@ def build_router(get_bot: Callable) -> APIRouter:
                       msgs=msgs, page=page, pages=max(1, -(-total // PAGE_SIZE)), label=db.group_label(gid),
                       shared=lambda iid: len(data.issue_groups(iid)))
 
+    @r.post("/groups/{gid}/systems")
+    async def set_systems(gid: str, request: Request):
+        bot = get_bot()
+        form = await request.form()
+        chosen = [x for x in form.getlist("systems") if bot.systems.valid(x)]
+        bot.db.set_group_systems(gid, chosen)
+        return back(f"/admin/groups/{gid}")
+
     @r.post("/groups/{gid}/center")
     def set_center(gid: str, center: str = Form(...)):
         get_bot().db.set_group_company(gid, center.strip())
@@ -219,10 +230,11 @@ def build_router(get_bot: Callable) -> APIRouter:
 
     # ------------------------------------------------------------ 問題
     @r.get("/issues", response_class=HTMLResponse)
-    def issues(request: Request, status: str = "open", kind: str = "", scope: str = "", group: str = ""):
+    def issues(request: Request, status: str = "open", kind: str = "", scope: str = "", group: str = "",
+               system: str = ""):
         db = get_bot().db
-        rows = issue_list(Snapshot(db), db, status, kind, scope, group)
-        return render(request, "issues.html", rows=rows, status=status, kind=kind, scope=scope, group=group,
+        rows = issue_list(Snapshot(db), db, status, kind, scope, group, system)
+        return render(request, "issues.html", rows=rows, status=status, kind=kind, scope=scope, group=group, system=system,
                       groups=db.groups(), label=db.group_label)
 
     @r.get("/issues/{iid}", response_class=HTMLResponse)
@@ -240,6 +252,15 @@ def build_router(get_bot: Callable) -> APIRouter:
         return render(request, "issue.html", i=i, by_group=by_group, source=db.messages_by_ids(msg_ids), anns=anns,
                       analysis=json.loads(i["analysis"]) if i.get("analysis") else None,
                       commits=json.loads(i.get("fix_commits") or "[]"), label=db.group_label)
+
+    @r.post("/issues/{iid}/system")
+    def issue_system(iid: int, system: str = Form(...)):
+        bot = get_bot()
+        if not bot.systems.valid(system):
+            raise HTTPException(400, "系統代號不正確")
+        if not pipeline.set_issue_system(bot.db, iid, system, bot.now()):
+            raise HTTPException(404)
+        return back(f"/admin/issues/{iid}")
 
     @r.post("/issues/{iid}/resolve")
     def issue_resolve(iid: int, note: str = Form(...), location: str = Form("")):
@@ -375,6 +396,23 @@ def daily_feedback(data: Snapshot, db, now: datetime, days: int, group: str = ""
     return out
 
 
+def system_breakdown(data: Snapshot, systems, group: str = "") -> list[dict]:
+    """各系統的回饋數與未完成問題數。"""
+    fb = [f for f in data.feedback if not group or f["group_id"] == group]
+    mine = {f["issue_id"] for f in fb if f.get("issue_id")}
+    out = []
+    for sid, name in systems.options() + [("unknown", "未分類")]:
+        n_fb = sum(1 for f in fb if (f.get("system_id") or "unknown") == sid)
+        issues = [i for i in data.issues if (i.get("system_id") or "unknown") == sid and (not group or i["id"] in mine)]
+        open_n = sum(1 for i in issues if i["status"] not in CLOSED)
+        common = sum(1 for i in issues if i["status"] not in CLOSED and len(data.issue_groups(i["id"])) >= 2)
+        if sid == "unknown" and not n_fb and not issues:
+            continue
+        out.append({"id": sid, "name": name, "feedback": n_fb, "open": open_n, "common": common,
+                    "resolved": sum(1 for i in issues if i["status"] == "resolved")})
+    return out
+
+
 def kind_breakdown(data: Snapshot, group: str = "") -> list[dict]:
     got = Counter(f["kind"] for f in data.feedback if not group or f["group_id"] == group)
     total = sum(got.values()) or 1
@@ -382,9 +420,11 @@ def kind_breakdown(data: Snapshot, group: str = "") -> list[dict]:
             for k, v in KIND_ZH.items()]
 
 
-def issue_list(data: Snapshot, db, status: str, kind: str, scope: str, group: str) -> list[dict]:
+def issue_list(data: Snapshot, db, status: str, kind: str, scope: str, group: str, system: str = "") -> list[dict]:
     rows = []
     for i in data.issues:
+        if system and (i.get("system_id") or "unknown") != system:
+            continue
         if status == "open":
             if i["status"] in CLOSED:
                 continue

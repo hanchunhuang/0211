@@ -49,14 +49,13 @@ def main(argv: list[str] | None = None) -> None:
     ctx = commands.Ctx(db=bot.db, line=bot.line, now=bot.now, run_digest=bot.job_digest,
                        run_announce=bot.job_announce, run_sync=bot.job_sync)
     if a.cmd == "digest":
-        res = pipeline.digest(bot.db, bot.llm, bot.s, bot.now(), repo=bot.repo, files=bot.files)
+        res = pipeline.digest(bot.db, bot.llm, bot.s, bot.now(), files=bot.files, systems=bot.systems)
         print(res.admin_summary, f"\n\n日報已存入後台：{res.report_name}")
     elif a.cmd == "sync":
-        print(pipeline.sync_commits(bot.db, bot.llm, bot.s, bot.repo, bot.now()).admin_summary)
+        print(pipeline.sync_commits(bot.db, bot.llm, bot.s, now=bot.now(), systems=bot.systems).admin_summary)
     elif a.cmd == "announce":
-        if bot.repo is not None:
-            print(pipeline.sync_commits(bot.db, bot.llm, bot.s, bot.repo, bot.now()).admin_summary, "\n")
-        res = pipeline.prepare_announcements(bot.db, bot.llm, bot.s, bot.now())
+        print(pipeline.sync_commits(bot.db, bot.llm, bot.s, now=bot.now(), systems=bot.systems).admin_summary, "\n")
+        res = pipeline.prepare_announcements(bot.db, bot.llm, bot.s, bot.now(), systems=bot.systems)
         print(res.admin_summary)
         if res.evaluation_name:
             print(f"\n成效評估已存入後台：{res.evaluation_name}")
@@ -87,7 +86,7 @@ def run_check() -> bool:
     import httpx
 
     from .config import Settings
-    from .repo import CodeRepo
+    from .systems import Systems
 
     s = Settings()
     ok = True
@@ -127,21 +126,25 @@ def run_check() -> bool:
     except Exception as e:  # noqa: BLE001
         line(False, "Claude API", str(e)[:200])
 
-    # 程式庫
-    if not s.repo_path:
-        warn("程式庫", "REPO_PATH 未設定：分析不會查程式碼，也不會自動配對 commit")
-    else:
-        repo = CodeRepo(s.repo_path, s.repo_branch, url=s.repo_url)
+    # 各系統的程式庫
+    systems = Systems.from_settings(s)
+    for sid in systems.ids():
+        name = f"程式庫：{systems.name(sid)}"
+        repo = systems.repo(sid)
+        if repo is None:
+            warn(name, f"沒有讀取權杖（REPO_TOKEN_{sid.upper()}）：這個系統的問題不會查程式碼，也不會自動配對 commit")
+            continue
         if not repo.exists():
-            line(False, "程式庫", f"{s.repo_path} 不是 git 專案" + ("，且用 REPO_URL 自動 clone 失敗（Token 過期或無權限？）" if s.repo_url else ""))
-        else:
-            try:
-                repo._git("fetch", "--quiet", "origin", s.repo_branch, timeout=120)
-                line(True, "程式庫", f"可讀取，最新 commit {repo._git('rev-parse', '--short', 'origin/' + s.repo_branch).strip()}")
-            except Exception as e:  # noqa: BLE001
-                line(False, "程式庫", f"git fetch 失敗（Token 過期或無權限？）{str(e)[:150]}")
-            if not (repo.path / s.repo_knowledge_file).exists():
-                warn("知識庫", f"找不到 {s.repo_knowledge_file}，公告的「在哪裡」會較不準")
+            line(False, name, "下載失敗（權杖錯誤、過期，或沒有這個 repo 的讀取權限）")
+            continue
+        try:
+            repo.update()
+            line(True, name, f"可讀取（{repo.branch}，最新 commit {repo._git('rev-parse', '--short', 'HEAD').strip()}）")
+        except Exception as e:  # noqa: BLE001
+            line(False, name, f"更新失敗：{str(e)[:150]}")
+        kf = systems.knowledge_file(sid)
+        if kf and not (repo.path / kf).exists():
+            warn(name, f"找不到操作說明檔 {kf}")
 
     # 資料庫與檔案
     try:

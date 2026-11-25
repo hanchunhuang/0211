@@ -44,15 +44,19 @@ class FakeLine:
 class FakeLLM:
     RULES = [("匯出", "bug", "匯出缺出貨日期"), ("庫存", "feature", "低庫存提醒")]
 
-    def extract(self, company, transcript, images):
+    def extract(self, company, transcript, images, systems_catalog=""):
         self.transcripts.append(transcript)
+        self.catalogs.append(systems_catalog)
+        ids = re.findall(r"^- (\w+)：", systems_catalog, re.M)
+        guess = ids[0] if ids else "unknown"
         items = []
         for line in transcript.splitlines():
             m = re.match(r"#(\d+) \[[^\]]+\] (\S+?)(?:（[^）]*）)?: (.*)", line)
             for kw, kind, title in self.RULES:
                 if m and kw in m.group(3):
+                    sys_id = self.system_for.get(kw, guess)
                     items.append(ExtractedFeedback(message_ids=[int(m.group(1))], reporter=m.group(2), kind=kind,
-                                                   title=title, detail=m.group(3), severity="medium"))
+                                                   title=title, detail=m.group(3), severity="medium", system=sys_id))
         return Extraction(items=items)
 
     def cluster(self, open_issues, new_feedback):
@@ -71,15 +75,19 @@ class FakeLLM:
 
     def __init__(self):
         self.transcripts = []
+        self.catalogs = []
+        self.system_for = {}          # 關鍵字 → 指定的系統代號（測試多系統用）
+        self.analyzed = []            # (issue 標題, 系統, 有沒有程式庫)
         self.analyze_had_repo = None
 
-    def analyze(self, issue, feedback, system_context, repo=None):
+    def analyze(self, issue, feedback, system_context, repo=None, knowledge_file=None):
         self.analyze_had_repo = repo is not None
+        self.analyzed.append((issue["title"], issue.get("system"), repo is not None))
         return Analysis(understanding="u", root_cause="匯出欄位未包含", proposed_changes=["加欄位"],
                         affected_area="訂單匯出", effort="S", priority="P1", risks=[], questions_to_confirm=[],
                         acceptance_checks=["匯出後有出貨日期"], files_to_change=[], user_path="訂單管理 → 匯出")
 
-    def match_commits(self, open_issues, commits, system_context, repo=None):
+    def match_commits(self, open_issues, commits, system_context, repo=None, knowledge_file=None):
         matches = []
         for c in commits:
             for i in open_issues:
@@ -122,6 +130,7 @@ def env(tmp_path, request):
     s.system_context_file = tmp_path / "none.md"
     s.auto_push = False
     s.staff_user_ids = ["Ustaff"]
+    s.systems_file = str(tmp_path / "no-systems.json")   # 預設單一系統；多系統另有測試
     s.repo_auto_update = False
     line = FakeLine()
     bot = Bot(settings=s, db=_make_db(request.param), line=line, llm=FakeLLM())
@@ -181,8 +190,8 @@ def test_full_daily_cycle(env):
     assert res.new_feedback == 3
     assert any("（客服）" in t for t in bot.llm.transcripts)
     report = bot.db.report(res.report_name)["content"]
-    common = report.split("## 一、共同問題")[1].split("## 二、")[0]
-    single = report.split("## 二、單一中心問題")[1].split("## 三、")[0]
+    common = report.split("### 共同問題")[1].split("### 單一單位問題")[0]
+    single = report.split("### 單一單位問題")[1].split("## 待處理清單")[0]
     assert "匯出缺出貨日期" in common and "甲公司" in common and "乙公司" in common
     assert "低庫存提醒" in single
     assert "大家中午吃什麼" not in report
@@ -399,3 +408,73 @@ def test_units_page(env):
     assert "已離開的群組" in r.text and "椰子園" in r.text
     assert "1</div><div class=\"k\">收集中的單位" in r.text
     assert any("開始收集" in t for _, t in line.pushes)
+
+
+def test_multiple_systems(env, tmp_path):
+    """回饋依系統分類：只在同系統內合併、用該系統的程式碼分析、改系統後重新分析、各系統分別配對 commit。"""
+    from feedbackbot.systems import Systems
+    bot, line, client = env
+    repos = {}
+    for sid in ("daycare", "pharma"):
+        p = tmp_path / sid
+        p.mkdir()
+        _git(p, "init", "-q", "-b", "master")
+        _git(p, "config", "user.email", "t@example.com")
+        _git(p, "config", "user.name", "t")
+        (p / "README.md").write_text(f"# {sid}\n", encoding="utf-8")
+        _git(p, "add", "-A")
+        _git(p, "commit", "-q", "-m", "feat: 初始")
+        repos[sid] = p
+    (tmp_path / "systems.json").write_text(json.dumps([
+        {"id": "daycare", "name": "日照系統", "description": "長照", "path": str(repos["daycare"])},
+        {"id": "pharma", "name": "藥師雜誌", "description": "雜誌", "path": str(repos["pharma"])},
+        {"id": "hcare", "name": "Hcare", "repo": "someone/hcare"},       # 沒有權杖：不查程式碼
+    ], ensure_ascii=False), encoding="utf-8")
+    bot.s.systems_file = str(tmp_path / "systems.json")
+    bot.systems = Systems.from_settings(bot.s)
+    assert bot.systems.repo("hcare") is None
+
+    ts = int(datetime(2026, 11, 21, 9, 0, tzinfo=TZ).timestamp() * 1000)
+    post(client, {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GA}},
+         {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GB}})
+    bot.db.set_group_systems(GA, ["daycare"])          # 甲只用日照系統
+    bot.llm.system_for = {"匯出": "daycare", "庫存": "pharma"}
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"), text_ev(GB, "U2", "匯出少了出貨日"),
+         text_ev(GB, "U3", "可以加庫存提醒嗎"))
+    res = pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ), systems=bot.systems)
+    assert "- daycare：日照系統" in bot.llm.catalogs[0] and "pharma" not in bot.llm.catalogs[0]  # 甲只給日照
+    export, stock = issue_by_title(bot, "匯出缺出貨日期"), issue_by_title(bot, "低庫存提醒")
+    assert export["system_id"] == "daycare" and stock["system_id"] == "pharma"
+    assert len(bot.db.issue_groups(export["id"])) == 2                     # 同系統、跨單位 → 共同問題
+    assert ("低庫存提醒", "藥師雜誌", True) in bot.llm.analyzed            # 用藥師雜誌的程式碼分析
+    report = bot.db.report(res.report_name)["content"]
+    assert "## 日照系統" in report and "## 藥師雜誌" in report
+
+    # AI 判斷錯 → 改系統：清掉分析，下次整理用新系統重新分析
+    post(client, text_ev(None, ADMIN, f"/system {stock['id']} hcare"))
+    assert "Hcare" in line.replies[-1]
+    assert bot.db.issue(stock["id"])["analysis"] is None
+    pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 22, 23, 30, tzinfo=TZ), systems=bot.systems)
+    assert bot.llm.analyzed[-1] == ("低庫存提醒", "Hcare", False)        # Hcare 沒權杖：不查程式碼
+    assert bot.db.issue(stock["id"])["status"] == "analyzed"
+
+    # commit 配對：各系統分別讀取，只配對該系統的問題
+    pipeline.sync_commits(bot.db, bot.llm, bot.s, systems=bot.systems)
+    (repos["daycare"] / "a.php").write_text("x")
+    _git(repos["daycare"], "add", "-A")
+    _git(repos["daycare"], "commit", "-qm", "fix: 訂單匯出加入出貨日期")
+    sync = pipeline.sync_commits(bot.db, bot.llm, bot.s, systems=bot.systems)
+    assert sync.commits == 1 and sync.resolved == [export["id"]]
+    assert "Hcare" in sync.admin_summary  # 讀不到程式碼的系統會提示
+
+    # 後台：依系統篩選、各系統統計、改系統
+    bot.s.admin_web_password = "pw"
+    origin = {"origin": "http://testserver"}
+    client.post("/admin/login", data={"password": "pw"}, headers=origin)
+    r = client.get("/admin/issues?status=all&system=hcare")
+    assert "低庫存提醒" in r.text and "匯出缺出貨日期" not in r.text
+    assert "各系統" in client.get("/admin").text
+    client.post(f"/admin/issues/{stock['id']}/system", data={"system": "pharma"}, headers=origin)
+    assert bot.db.issue(stock["id"])["system_id"] == "pharma"
+    client.post(f"/admin/groups/{GB}/systems", data={"systems": ["pharma", "nope"]}, headers=origin)
+    assert bot.db.group(GB)["systems"] == ["pharma"]

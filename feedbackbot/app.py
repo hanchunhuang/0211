@@ -25,7 +25,7 @@ from .config import Settings
 from .db import DB
 from .line_api import LineClient, verify_signature
 from .llm import ClaudeLLM
-from .repo import CodeRepo
+from .systems import Systems
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("feedbackbot")
@@ -40,8 +40,7 @@ class Bot:
         self.files = files or self.s.make_files()
         self.line = line or LineClient(self.s.line_access_token)
         self.llm = llm or ClaudeLLM(self.s.claude_model, knowledge_file=self.s.repo_knowledge_file)
-        self.repo = repo if repo is not None else (
-            CodeRepo(self.s.repo_path, self.s.repo_branch, url=self.s.repo_url) if self.s.repo_path else None)
+        self.systems = Systems.single(self.s, repo) if repo is not None else Systems.from_settings(self.s)
         self.tz = ZoneInfo(self.s.timezone)
         self._names: dict[tuple[str, str], str] = {}
 
@@ -69,7 +68,7 @@ class Bot:
     # ---------------- 排程工作 ----------------
     def job_digest(self) -> str:
         try:
-            res = pipeline.digest(self.db, self.llm, self.s, self.now(), repo=self.repo, files=self.files)
+            res = pipeline.digest(self.db, self.llm, self.s, self.now(), files=self.files, systems=self.systems)
             msg = res.admin_summary + (f"\n\n完整日報：{self._report_link(res.report_name)}" if res.report_name else "")
         except Exception as e:  # noqa: BLE001
             log.exception("digest failed")
@@ -79,7 +78,7 @@ class Bot:
 
     def job_sync(self, notify: bool = True) -> str:
         try:
-            msg = pipeline.sync_commits(self.db, self.llm, self.s, self.repo, self.now()).admin_summary
+            msg = pipeline.sync_commits(self.db, self.llm, self.s, now=self.now(), systems=self.systems).admin_summary
         except Exception as e:  # noqa: BLE001
             log.exception("sync commits failed")
             msg = f"⚠️ 讀取 commit 失敗：{e}"
@@ -88,9 +87,9 @@ class Bot:
         return msg
 
     def job_announce(self) -> str:
-        sync_msg = self.job_sync(notify=False) if self.repo is not None else ""
+        sync_msg = self.job_sync(notify=False)
         try:
-            res = pipeline.prepare_announcements(self.db, self.llm, self.s, self.now())
+            res = pipeline.prepare_announcements(self.db, self.llm, self.s, self.now(), systems=self.systems)
             msg = (sync_msg + "\n\n" if sync_msg else "") + res.admin_summary
             if res.evaluation_name:
                 msg += f"\n\n成效評估報告：{self._report_link(res.evaluation_name)}"
@@ -215,7 +214,7 @@ class Bot:
 
     def _run_command(self, text: str, reply_token: str, user_id: str, group_id: str | None) -> None:
         cmd = text.split()[0].lower()
-        ctx = commands.Ctx(db=self.db, line=self.line, now=self.now, group_id=group_id,
+        ctx = commands.Ctx(db=self.db, line=self.line, now=self.now, group_id=group_id, systems=self.systems,
                            run_digest=self.job_digest, run_announce=self.job_announce, run_sync=self.job_sync)
         if cmd in ("/today", "/announce", "/sync"):
             # 需要呼叫 AI，時間較長：先回覆，再在背景執行，完成後推播給管理者

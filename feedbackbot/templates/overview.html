@@ -55,6 +55,17 @@
   </div>
 </div>
 
+<h2>各系統</h2>
+<div class="card scroll">
+  <table>
+    <tr><th>系統</th><th class="n">回饋</th><th class="n">未完成問題</th><th class="n">其中共同問題</th><th class="n">已修正</th></tr>
+    {% for x in by_system %}
+    <tr><td class="nowrap"><a href="/admin/issues?system={{ x.id }}{% if group %}&group={{ group }}{% endif %}">{{ x.name }}</a></td>
+      <td class="n">{{ x.feedback }}</td><td class="n">{{ x.open }}</td><td class="n">{{ x.common }}</td><td class="n">{{ x.resolved }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
 <h2>各群組</h2>
 <div class="card scroll">
   {% if groups %}

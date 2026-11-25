@@ -55,7 +55,8 @@ class CodeRepo:
         if self.url and not self._clone_failed:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                r = subprocess.run(["git", "clone", "--quiet", f"--depth={self.CLONE_DEPTH}", "--branch", self.branch,
+                branch = ["--branch", self.branch] if self.branch else []  # 沒指定就用 repo 的預設分支
+                r = subprocess.run(["git", "clone", "--quiet", f"--depth={self.CLONE_DEPTH}", *branch,
                                     self.url, str(self.path)], capture_output=True, text=True, timeout=600)
                 if r.returncode != 0:
                     # 錯誤訊息可能含網址（裡面有 Token），只記錄前段且遮蔽
@@ -64,7 +65,10 @@ class CodeRepo:
             except (OSError, subprocess.SubprocessError):
                 log.exception("clone 失敗")
                 self._clone_failed = True
-        return (self.path / ".git").exists()
+        ok = (self.path / ".git").exists()
+        if ok and not self.branch:
+            self.branch = self._git("rev-parse", "--abbrev-ref", "HEAD").strip() or "master"
+        return ok
 
     def _git(self, *args: str, check: bool = True, timeout: int = 120) -> str:
         r = subprocess.run(["git", "-C", str(self.path), *args], capture_output=True, text=True,
@@ -76,6 +80,8 @@ class CodeRepo:
 
     def update(self) -> None:
         """抓最新的遠端分支（唯讀；不保留本機修改）。"""
+        if not self.exists():
+            return
         shallow = (self.path / ".git" / "shallow").exists()
         depth = [f"--depth={self.CLONE_DEPTH}"] if shallow else []
         self._git("fetch", "--quiet", *depth, "origin", self.branch, timeout=300)

@@ -16,6 +16,13 @@
       <input type="text" name="center" value="{{ g.company or '' }}" placeholder="中心名稱" aria-label="中心名稱" required>
       <button>更新</button>
     </form>
+    <form method="post" action="/admin/groups/{{ g.id }}/systems" style="margin-top:12px">
+      <div class="sub">這個單位使用的系統（AI 會優先從勾選的系統中判斷；都不勾＝從全部系統判斷）</div>
+      {% for sid, sname in sys_options %}
+      <label style="display:block;margin-top:4px"><input type="checkbox" name="systems" value="{{ sid }}" {{ 'checked' if sid in (g.systems or []) }}> {{ sname }}</label>
+      {% endfor %}
+      <button style="margin-top:6px">儲存系統</button>
+    </form>
     {% if not g.center_set %}<p class="sub" style="color:var(--warn);margin:6px 0 0">尚未設定中心名稱，目前暫用 LINE 群組名稱。</p>{% endif %}
   </div>
 </div>

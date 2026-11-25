@@ -21,12 +21,13 @@
 <h2>{{ profile.name }} 負責收集的單位</h2>
 <div class="card scroll">
   {% if active %}<table>
-    <tr><th>中心</th><th>LINE 群組</th><th>加入時間</th><th class="n">訊息（7天／全部）</th><th class="n">回饋</th>
+    <tr><th>中心</th><th>使用系統</th><th>LINE 群組</th><th>加入時間</th><th class="n">訊息（7天／全部）</th><th class="n">回饋</th>
       <th class="n">未完成問題</th><th class="n">已修正</th><th>最後訊息</th></tr>
     {% for g in active %}
     <tr>
       <td class="nowrap"><a href="/admin/groups/{{ g.id }}">{{ g.label }}</a>
         {% if not g.center_set %} <span class="pill draft">未設定</span>{% endif %}</td>
+      <td class="sub">{% if g.systems %}{% for x in g.systems %}<span class="pill" style="margin:1px">{{ sysname(x) }}</span>{% endfor %}{% else %}<span class="pill draft">未設定</span>{% endif %}</td>
       <td class="sub nowrap">{{ g.name or '' }}</td>
       <td class="sub nowrap">{{ g.joined_at | t }}</td>
       <td class="n">{{ g.msgs7 }}／{{ g.msgs }}</td>

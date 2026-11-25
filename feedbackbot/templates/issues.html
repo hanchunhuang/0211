@@ -11,6 +11,9 @@
   <select name="scope" aria-label="範圍"><option value="">共同＋單一</option>
     <option value="common" {{ 'selected' if scope == 'common' }}>共同問題</option>
     <option value="single" {{ 'selected' if scope == 'single' }}>單一中心</option></select>
+  <select name="system" aria-label="系統"><option value="">全部系統</option>
+    {% for sid, sname in sys_options %}<option value="{{ sid }}" {{ 'selected' if system == sid }}>{{ sname }}</option>{% endfor %}
+    <option value="unknown" {{ 'selected' if system == 'unknown' }}>未分類</option></select>
   <select name="kind" aria-label="類型"><option value="">全部類型</option>
     {% for k, v in KIND_ZH.items() %}<option value="{{ k }}" {{ 'selected' if kind == k }}>{{ v }}</option>{% endfor %}</select>
   <select name="group" aria-label="群組"><option value="">全部群組</option>
@@ -19,9 +22,9 @@
 </form>
 <div class="card scroll">
   {% if rows %}<table>
-    <tr><th>#</th><th>問題</th><th>類型</th><th>優先級</th><th>狀態</th><th>反映的中心</th><th class="n">回饋數</th><th>最近回報</th></tr>
+    <tr><th>#</th><th>系統</th><th>問題</th><th>類型</th><th>優先級</th><th>狀態</th><th>反映的中心</th><th class="n">回饋數</th><th>最近回報</th></tr>
     {% for i in rows %}
-    <tr><td>{{ i.id }}</td><td class="title-col"><a href="/admin/issues/{{ i.id }}">{{ i.title }}</a>{% if i.module %}<div class="sub">{{ i.module }}</div>{% endif %}</td>
+    <tr><td>{{ i.id }}</td><td class="nowrap sub">{{ sysname(i.system_id) }}</td><td class="title-col"><a href="/admin/issues/{{ i.id }}">{{ i.title }}</a>{% if i.module %}<div class="sub">{{ i.module }}</div>{% endif %}</td>
       <td style="white-space:nowrap">{{ KIND_ZH.get(i.kind, i.kind) }}</td>
       <td><span class="pill {{ i.priority }}">{{ i.priority or '-' }}</span></td>
       <td><span class="pill {{ i.status }}">{{ STATUS_ZH.get(i.status) }}</span></td>

@@ -13,6 +13,7 @@ HELP = """🛠 管理指令
 /today　立即整理目前收集到的回饋（產生日報）
 /issues　列出未完成問題
 /issue 編號　看問題細節與修改建議
+/system 編號 系統代號　改正問題所屬的系統（/systems 看代號）
 /start 編號　標記為修改中
 /resolve 編號 怎麼改的 | 在哪裡　手動標記完成
 /sync　立即讀取新 commit 並自動配對已修正的問題
@@ -37,6 +38,11 @@ class Ctx:
     run_announce: Callable[[], str]
     run_sync: Callable[[], str] = lambda: "（未啟用）"
     group_id: str | None = None            # 指令下在哪個群組（私訊為 None）
+    systems: object = None                 # Systems（系統清單）
+
+
+def _sys_name(ctx: Ctx, sid) -> str:
+    return ctx.systems.name(sid) if ctx.systems is not None else (sid or "")
 
 
 def handle(ctx: Ctx, text: str) -> str:
@@ -69,11 +75,30 @@ def handle(ctx: Ctx, text: str) -> str:
         if not rows:
             return "目前沒有未完成的問題 🎉"
         lines = [f"未完成問題 {len(rows)} 個："]
+        by_sys: dict = {}
         for i in rows:
-            n = len(db.issue_groups(i["id"]))
-            tag = "🔁" if n >= 2 else "👤"
-            lines.append(f"{tag} #{i['id']} [{i['priority'] or '-'}] {i['title']}（{STATUS_ZH.get(i['status'])}，{n}家）")
+            by_sys.setdefault(i.get("system_id") or "unknown", []).append(i)
+        for sid, items in by_sys.items():
+            lines.append(f"\n【{_sys_name(ctx, sid)}】")
+            for i in items:
+                n = len(db.issue_groups(i["id"]))
+                tag = "🔁" if n >= 2 else "👤"
+                lines.append(f"{tag} #{i['id']} [{i['priority'] or '-'}] {i['title']}（{STATUS_ZH.get(i['status'])}，{n}個單位）")
         return "\n".join(lines)
+
+    if cmd == "/systems":
+        if ctx.systems is None:
+            return "未設定系統清單"
+        return "系統代號：\n" + "\n".join(f"{sid}　{name}" for sid, name in ctx.systems.options())
+
+    if cmd == "/system":
+        m = re.match(r"#?(\d+)\s+(\S+)", rest)
+        if not m or ctx.systems is None or not ctx.systems.valid(m.group(2)):
+            return "格式：/system 問題編號 系統代號（代號用 /systems 查）"
+        from .pipeline import set_issue_system
+        if not set_issue_system(db, int(m.group(1)), m.group(2), ctx.now()):
+            return "找不到這個問題編號"
+        return f"#{m.group(1)} 已改為「{_sys_name(ctx, m.group(2))}」，下次整理（/today）時會用這個系統的程式碼重新分析。"
 
     if cmd == "/issue":
         iid = _int(rest)
@@ -81,7 +106,8 @@ def handle(ctx: Ctx, text: str) -> str:
         if not i:
             return "找不到這個問題編號"
         cos = "、".join(db.group_label(g) for g in db.issue_groups(iid))
-        out = [f"#{i['id']} {i['title']}", f"{KIND_ZH.get(i['kind'], i['kind'])}｜{i['priority'] or '-'}｜"
+        out = [f"#{i['id']} {i['title']}", f"系統：{_sys_name(ctx, i.get('system_id'))}",
+               f"{KIND_ZH.get(i['kind'], i['kind'])}｜{i['priority'] or '-'}｜"
                f"{STATUS_ZH.get(i['status'])}｜{cos}", "", i["summary"], "", "回饋："]
         for f in db.issue_feedback(iid):
             out.append(f"• [{db.group_label(f['group_id'])}] {f['reporter'] or ''}：{f['detail']}")

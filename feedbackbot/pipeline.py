@@ -18,6 +18,7 @@ from .config import Settings
 from .db import DB
 from .llm import LLM
 from .repo import CodeRepo
+from .systems import UNKNOWN, Systems
 
 log = logging.getLogger(__name__)
 RUN_LOCK = threading.Lock()
@@ -69,90 +70,123 @@ def _transcript(db: DB, rows: list, staff_ids: list[str] | None = None,
     return "\n".join(lines), images
 
 
+def _resolve_systems(settings: Settings, repo: CodeRepo | None, systems: Systems | None) -> Systems:
+    if systems is not None:
+        return systems
+    if repo is not None:
+        return Systems.single(settings, repo)
+    return Systems.from_settings(settings)
+
+
+def _group_candidates(db: DB, systems: Systems, group_id: str) -> list[str]:
+    g = db.group(group_id) or {}
+    chosen = [x for x in (g.get("systems") or []) if systems.valid(x)]
+    return chosen or systems.ids()
+
+
 def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
-           repo: CodeRepo | None = None, files=None) -> DigestResult:
+           repo: CodeRepo | None = None, files=None, systems: Systems | None = None) -> DigestResult:
     now = now or now_in(settings)
     day = now.strftime("%Y-%m-%d")
     res = DigestResult(date=day)
+    systems = _resolve_systems(settings, repo, systems)
     with RUN_LOCK:
-        # ---- 1. 每個群組各自萃取回饋 ----
+        # ---- 1. 每個群組各自萃取回饋，並判斷屬於哪個系統 ----
         for group_id, rows in db.unprocessed_messages().items():
             company = db.group_label(group_id)
             transcript, images = _transcript(db, rows, settings.staff_user_ids, files)
             valid_ids = {r["id"] for r in rows}
+            cands = _group_candidates(db, systems, group_id)
             if any(r["kind"] in ("text", "image") for r in rows):
-                extraction = llm.extract(company, transcript, images[: settings.max_images_per_group])
+                catalog = systems.catalog(only=cands, with_readme=len(cands) > 1)
+                extraction = llm.extract(company, transcript, images[: settings.max_images_per_group], catalog)
                 for it in extraction.items:
                     ids = [i for i in it.message_ids if i in valid_ids]
+                    sid = it.system if systems.valid(it.system) else (cands[0] if len(cands) == 1 else UNKNOWN)
                     db.add_feedback(group_id=group_id, message_ids=ids, reporter=it.reporter, kind=it.kind,
                                     title=it.title, detail=it.detail, severity=it.severity,
-                                    digest_date=day, now=now)
+                                    digest_date=day, now=now, system_id=sid)
                     res.new_feedback += 1
             db.mark_processed([r["id"] for r in rows])
 
-        # ---- 2. 跨群組歸類（找出共同問題）----
-        new_fb = db.unlinked_feedback()
+        # ---- 2. 同一個系統內，跨單位歸類（找出共同問題）----
         touched: set[int] = set()
-        if new_fb:
-            open_issues = [
-                {"id": i["id"], "title": i["title"], "kind": i["kind"], "summary": i["summary"],
-                 "module": i["module"], "companies": [db.group_label(g) for g in db.issue_groups(i["id"])]}
-                for i in db.open_issues()
-            ]
-            fb_payload = [
-                {"feedback_id": f["id"], "company": db.group_label(f["group_id"]), "kind": f["kind"],
-                 "title": f["title"], "detail": f["detail"]}
-                for f in new_fb
-            ]
-            clustering = llm.cluster(open_issues, fb_payload)
-            open_ids = {i["id"] for i in open_issues}
-            key_to_issue: dict[str, int] = {}
-            new_by_key = {n.key: n for n in clustering.new_issues}
-            assigned: set[int] = set()
-            fb_by_id = {f["id"]: f for f in new_fb}
-            for a in clustering.assignments:
-                if a.feedback_id not in fb_by_id or a.feedback_id in assigned:
-                    continue
-                if a.issue_id in open_ids:
-                    issue_id = a.issue_id
-                elif a.new_issue_key in new_by_key:
-                    if a.new_issue_key not in key_to_issue:
-                        n = new_by_key[a.new_issue_key]
-                        key_to_issue[a.new_issue_key] = db.create_issue(n.title, n.kind, n.summary, n.module, now)
-                    issue_id = key_to_issue[a.new_issue_key]
-                else:
-                    continue
-                db.link_feedback(a.feedback_id, issue_id)
-                assigned.add(a.feedback_id)
-                touched.add(issue_id)
-            # 模型漏掉的回饋：自成一個新問題，確保不遺失
-            for fid, f in fb_by_id.items():
-                if fid not in assigned:
-                    issue_id = db.create_issue(f["title"], f["kind"], f["detail"], None, now)
-                    db.link_feedback(fid, issue_id)
-                    touched.add(issue_id)
+        by_system: dict[str, list[dict]] = {}
+        for f in db.unlinked_feedback():
+            by_system.setdefault(f.get("system_id") or UNKNOWN, []).append(f)
+        for sid, new_fb in by_system.items():
+            touched |= _cluster_system(db, llm, sid, new_fb, now)
 
-        # ---- 3. 對今天有變動的問題做修改分析 ----
-        if touched and repo is not None and repo.exists() and settings.repo_auto_update:
-            _safe_update(repo)
-        system_context = settings.system_context(repo)
-        for issue_id in sorted(touched):
+        # ---- 3. 修改分析：今天有變動的問題，以及改過系統、等待重新分析的問題 ----
+        pending = {i["id"] for i in db.open_issues() if i["status"] == "open" and not i.get("analysis")}
+        targets = sorted(touched | pending)
+        updated: set[str] = set()
+        for issue_id in targets:
             issue = db.issue(issue_id)
             if issue["status"] in ("resolved", "wontfix", "in_progress"):
                 continue
-            feedback = _feedback_payload(db, issue_id)
+            sid = issue.get("system_id") or UNKNOWN
+            sys_repo = systems.repo(sid)
+            if sys_repo is not None and sid not in updated and settings.repo_auto_update and sys_repo.exists():
+                _safe_update(sys_repo)
+                updated.add(sid)
+            usable = sys_repo if (sys_repo is not None and sys_repo.exists()) else None
             analysis = llm.analyze(
-                {"id": issue_id, "title": issue["title"], "kind": issue["kind"], "summary": issue["summary"],
-                 "module": issue["module"]},
-                feedback, system_context, repo=repo)
+                {"id": issue_id, "system": systems.name(sid), "title": issue["title"], "kind": issue["kind"],
+                 "summary": issue["summary"], "module": issue["module"]},
+                _feedback_payload(db, issue_id), systems.context(sid), repo=usable,
+                knowledge_file=systems.knowledge_file(sid))
             db.update_issue(issue_id, now, analysis=analysis.model_dump(), priority=analysis.priority,
                             status="analyzed")
         res.touched_issue_ids = sorted(touched)
 
         # ---- 4. 日報 ----
-        res.report_name = _write_digest_report(db, settings, res, now)
-        res.admin_summary = _admin_digest_summary(db, res)
+        res.report_name = _write_digest_report(db, settings, res, now, systems)
+        res.admin_summary = _admin_digest_summary(db, res, systems)
         return res
+
+
+def _cluster_system(db: DB, llm: LLM, sid: str, new_fb: list[dict], now: datetime) -> set[int]:
+    """把同一個系統的新回饋，歸入既有問題或建立新問題。回傳有變動的問題編號。"""
+    touched: set[int] = set()
+    open_issues = [
+        {"id": i["id"], "title": i["title"], "kind": i["kind"], "summary": i["summary"],
+         "module": i["module"], "companies": [db.group_label(g) for g in db.issue_groups(i["id"])]}
+        for i in db.open_issues() if (i.get("system_id") or UNKNOWN) == sid
+    ]
+    fb_payload = [
+        {"feedback_id": f["id"], "company": db.group_label(f["group_id"]), "kind": f["kind"],
+         "title": f["title"], "detail": f["detail"]}
+        for f in new_fb
+    ]
+    clustering = llm.cluster(open_issues, fb_payload)
+    open_ids = {i["id"] for i in open_issues}
+    key_to_issue: dict[str, int] = {}
+    new_by_key = {n.key: n for n in clustering.new_issues}
+    assigned: set[int] = set()
+    fb_by_id = {f["id"]: f for f in new_fb}
+    for a in clustering.assignments:
+        if a.feedback_id not in fb_by_id or a.feedback_id in assigned:
+            continue
+        if a.issue_id in open_ids:
+            issue_id = a.issue_id
+        elif a.new_issue_key in new_by_key:
+            if a.new_issue_key not in key_to_issue:
+                n = new_by_key[a.new_issue_key]
+                key_to_issue[a.new_issue_key] = db.create_issue(n.title, n.kind, n.summary, n.module, now, system_id=sid)
+            issue_id = key_to_issue[a.new_issue_key]
+        else:
+            continue
+        db.link_feedback(a.feedback_id, issue_id)
+        assigned.add(a.feedback_id)
+        touched.add(issue_id)
+    # 模型漏掉的回饋：自成一個新問題，確保不遺失
+    for fid, f in fb_by_id.items():
+        if fid not in assigned:
+            issue_id = db.create_issue(f["title"], f["kind"], f["detail"], None, now, system_id=sid)
+            db.link_feedback(fid, issue_id)
+            touched.add(issue_id)
+    return touched
 
 
 def _feedback_payload(db: DB, issue_id: int) -> list[dict]:
@@ -170,10 +204,10 @@ def _is_common(db: DB, issue_id: int) -> bool:
 def _issue_md(db: DB, issue_id: int, today: str) -> str:
     i = db.issue(issue_id)
     companies = [db.group_label(g) for g in db.issue_groups(issue_id)]
-    out = [f"### #{i['id']} {i['title']}",
+    out = [f"#### #{i['id']} {i['title']}",
            f"- 類型：{KIND_ZH.get(i['kind'], i['kind'])}　優先級：{i['priority'] or '-'}　狀態：{STATUS_ZH.get(i['status'], i['status'])}",
            f"- 模組：{i['module'] or '-'}",
-           f"- 回報中心：{'、'.join(companies)}",
+           f"- 回報單位：{'、'.join(companies)}",
            f"- 問題摘要：{i['summary']}",
            "- 使用者原話："]
     for f in db.issue_feedback(issue_id):
@@ -205,37 +239,59 @@ def _issue_md(db: DB, issue_id: int, today: str) -> str:
     return "\n".join(out)
 
 
-def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: datetime) -> str:
-    common = [i for i in res.touched_issue_ids if _is_common(db, i)]
-    single = [i for i in res.touched_issue_ids if not _is_common(db, i)]
+def _by_system(systems: Systems, issue_ids: list[int], db: DB) -> list[tuple[str, list[int]]]:
+    """依系統分組（系統清單的順序，未分類放最後）。"""
+    groups: dict[str, list[int]] = {}
+    for iid in issue_ids:
+        groups.setdefault(db.issue(iid).get("system_id") or UNKNOWN, []).append(iid)
+    order = systems.ids() + [k for k in groups if k not in systems.ids()]
+    return [(k, groups[k]) for k in order if k in groups]
+
+
+def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: datetime, systems: Systems) -> str:
     backlog = db.open_issues()
+    sections = _by_system(systems, res.touched_issue_ids, db)
     lines = [
         f"# 回饋日報 {res.date}",
         "",
         f"產生時間：{now.strftime('%Y-%m-%d %H:%M')}",
         "",
         f"- 今日新回饋：{res.new_feedback} 筆",
-        f"- 今日涉及問題：{len(res.touched_issue_ids)} 個（共同問題 {len(common)}、單一中心問題 {len(single)}）",
+        f"- 今日涉及問題：{len(res.touched_issue_ids)} 個",
+        *[f"  - {systems.name(sid)}：{len(ids)} 個（共同 {sum(_is_common(db, i) for i in ids)}）" for sid, ids in sections],
         f"- 目前未完成問題總數：{len(backlog)}",
         "",
-        "## 一、共同問題（2 家以上中心反映）",
+    ]
+    if not sections:
+        lines += ["今天沒有新的系統回饋。", ""]
+    for sid, ids in sections:
+        common = [i for i in ids if _is_common(db, i)]
+        single = [i for i in ids if not _is_common(db, i)]
+        lines += [
+            f"## {systems.name(sid)}",
+            "",
+            "### 共同問題（2 個以上單位反映）",
+            "",
+            *([_issue_md(db, i, res.date) + "\n" for i in common] or ["（無）\n"]),
+            "### 單一單位問題",
+            "",
+            *([_issue_md(db, i, res.date) + "\n" for i in single] or ["（無）\n"]),
+        ]
+    lines += [
+        "## 待處理清單（全部未完成）",
         "",
-        *([_issue_md(db, i, res.date) + "\n" for i in common] or ["（無）\n"]),
-        "## 二、單一中心問題",
+        "| # | 系統 | 標題 | 類型 | 優先級 | 狀態 | 單位數 |",
+        "|---|---|---|---|---|---|---|",
+        *[f"| {i['id']} | {systems.name(i.get('system_id'))} | {i['title']} | {KIND_ZH.get(i['kind'], i['kind'])} | "
+          f"{i['priority'] or '-'} | {STATUS_ZH.get(i['status'], i['status'])} | {len(db.issue_groups(i['id']))} |"
+          for i in backlog],
         "",
-        *([_issue_md(db, i, res.date) + "\n" for i in single] or ["（無）\n"]),
-        "## 三、待處理清單（全部未完成）",
+        "## 改完後怎麼標記",
         "",
-        "| # | 標題 | 類型 | 優先級 | 狀態 | 中心數 |",
-        "|---|---|---|---|---|---|",
-        *[f"| {i['id']} | {i['title']} | {KIND_ZH.get(i['kind'], i['kind'])} | {i['priority'] or '-'} | "
-          f"{STATUS_ZH.get(i['status'], i['status'])} | {len(db.issue_groups(i['id']))} |" for i in backlog],
-        "",
-        "## 四、改完後怎麼標記",
-        "",
-        "- 照平常一樣 commit（`feat:`／`fix:` + 中文說明）並推到 master，隔天早上會自動配對到問題；",
+        "- 照平常一樣在該系統的程式庫 commit（`feat:`／`fix:` + 中文說明），隔天早上會自動配對到問題；",
         "  commit 訊息裡寫 `#編號`（例如 `fix: … (#12)`）配對最準。",
         "- 也可以 LINE 私訊機器人：`/resolve 編號 怎麼改的 | 在哪裡`",
+        "- AI 判斷錯系統時：後台問題頁可改系統，或私訊 `/system 編號 系統代號`，改完會重新分析。",
         "",
     ]
     name = f"{res.date}-digest.md"
@@ -243,21 +299,19 @@ def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: dat
     return name
 
 
-def _admin_digest_summary(db: DB, res: DigestResult) -> str:
+def _admin_digest_summary(db: DB, res: DigestResult, systems: Systems) -> str:
     if not res.touched_issue_ids:
         return f"📋 {res.date} 回饋日報：今天沒有新的系統回饋。"
     lines = [f"📋 {res.date} 回饋日報", f"新回饋 {res.new_feedback} 筆，涉及 {len(res.touched_issue_ids)} 個問題", ""]
-    for label, ids in (("🔁 共同問題", [i for i in res.touched_issue_ids if _is_common(db, i)]),
-                       ("👤 單一問題", [i for i in res.touched_issue_ids if not _is_common(db, i)])):
-        if not ids:
-            continue
-        lines.append(label)
-        for i in ids:
+    for sid, ids in _by_system(systems, res.touched_issue_ids, db):
+        lines.append(f"【{systems.name(sid)}】")
+        for i in sorted(ids, key=lambda x: not _is_common(db, x)):
             iss = db.issue(i)
+            tag = "🔁" if _is_common(db, i) else "👤"
             cos = "、".join(db.group_label(g) for g in db.issue_groups(i))
-            lines.append(f"#{i} [{iss['priority'] or '-'}] {iss['title']}（{cos}）")
+            lines.append(f"{tag} #{i} [{iss['priority'] or '-'}] {iss['title']}（{cos}）")
         lines.append("")
-    lines.append("看細節：/issue 編號　改完：/resolve 編號 說明 | 位置")
+    lines.append("🔁 共同問題　👤 單一單位\n看細節：/issue 編號　改完：/resolve 編號 說明 | 位置")
     return "\n".join(lines)
 
 
@@ -270,6 +324,20 @@ def resolve_issue(db: DB, issue_id: int, note: str, location: str, now: datetime
         return False
     db.update_issue(issue_id, now, status=status, resolution_note=note, resolution_location=location,
                     resolved_at=now.isoformat(), fix_commits=json.dumps(commits or []), auto_resolved=int(auto))
+    return True
+
+
+def set_issue_system(db: DB, issue_id: int, system_id: str, now: datetime) -> bool:
+    """改正問題所屬的系統；未完成的問題會清掉舊分析，下次整理時用新系統的程式碼重新分析。"""
+    i = db.issue(issue_id)
+    if not i:
+        return False
+    fields: dict = {"system_id": system_id}
+    if i["status"] not in ("resolved", "wontfix"):
+        fields.update(analysis=None, priority=None, status="open")
+    db.update_issue(issue_id, now, **fields)
+    for f in db.issue_feedback(issue_id):
+        db.s.update("feedback", f["id"], {"system_id": system_id})
     return True
 
 
@@ -290,6 +358,8 @@ class SyncResult:
     commits: int = 0
     resolved: list[int] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
+    per_system: list[tuple[str, int]] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
     admin_summary: str = ""
 
 
@@ -303,51 +373,64 @@ def _safe_update(repo: CodeRepo) -> None:
 _CONF_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
-def sync_commits(db: DB, llm: LLM, settings: Settings, repo: CodeRepo, now: datetime | None = None) -> SyncResult:
-    """讀取上次之後的新 commit，配對到未完成的問題。高信心自動標記完成；中信心列為建議。"""
+def sync_commits(db: DB, llm: LLM, settings: Settings, repo: CodeRepo | None = None,
+                 now: datetime | None = None, systems: Systems | None = None) -> SyncResult:
+    """讀取各系統上次之後的新 commit，配對到該系統未完成的問題。高信心自動標記完成；中信心列為建議。"""
     now = now or now_in(settings)
     res = SyncResult()
-    if repo is None or not repo.exists():
-        res.admin_summary = "（未設定 REPO_PATH，略過 commit 配對）"
-        return res
+    systems = _resolve_systems(settings, repo, systems)
     with RUN_LOCK:
-        if settings.repo_auto_update:
-            _safe_update(repo)
-        last = db.get_kv("last_commit")
-        commits = repo.commits_since(last)
-        res.commits = len(commits)
-        open_issues = db.open_issues()
-        if commits and open_issues:
-            issues_payload = [
-                {"id": i["id"], "title": i["title"], "kind": i["kind"], "summary": i["summary"], "module": i["module"],
-                 "user_path": (json.loads(i["analysis"]).get("user_path") if i["analysis"] else ""),
-                 "feedback": [f["detail"] for f in db.issue_feedback(i["id"])][:5]}
-                for i in open_issues
-            ]
-            matching = llm.match_commits(issues_payload, [c.as_dict() for c in commits],
-                                         settings.system_context(repo), repo=repo)
-            valid = {i["id"] for i in open_issues}
-            threshold = _CONF_RANK.get(settings.commit_match_min_confidence, 2)
-            for m in matching.matches:
-                if m.issue_id not in valid:
-                    continue
-                if _CONF_RANK[m.confidence] >= threshold:
-                    resolve_issue(db, m.issue_id, m.how_fixed, m.where, now, commits=m.commit_hashes, auto=True)
-                    res.resolved.append(m.issue_id)
-                elif m.confidence == "medium":
-                    res.suggestions.append(
-                        f"#{m.issue_id} 可能已由 {', '.join(m.commit_hashes)} 處理：{m.reason}\n"
-                        f"確認的話回：/resolve {m.issue_id} {m.how_fixed} | {m.where}")
-        if commits:
-            db.set_kv("last_commit", commits[-1].hash)
-        elif last is None:
-            db.set_kv("last_commit", repo.head())
+        for sid in systems.ids():
+            sys_repo = systems.repo(sid)
+            if sys_repo is None or not sys_repo.exists():
+                res.skipped.append(systems.name(sid))
+                continue
+            if settings.repo_auto_update:
+                _safe_update(sys_repo)
+            key = f"last_commit:{sid}"
+            last = db.get_kv(key)
+            if last is None and sid == systems.ids()[0]:
+                last = db.get_kv("last_commit")  # 舊版（單一系統）留下的紀錄
+            commits = sys_repo.commits_since(last)
+            res.commits += len(commits)
+            if commits:
+                res.per_system.append((systems.name(sid), len(commits)))
+            open_issues = [i for i in db.open_issues() if (i.get("system_id") or UNKNOWN) == sid]
+            if commits and open_issues:
+                issues_payload = [
+                    {"id": i["id"], "title": i["title"], "kind": i["kind"], "summary": i["summary"],
+                     "module": i["module"],
+                     "user_path": (json.loads(i["analysis"]).get("user_path") if i["analysis"] else ""),
+                     "feedback": [f["detail"] for f in db.issue_feedback(i["id"])][:5]}
+                    for i in open_issues
+                ]
+                matching = llm.match_commits(issues_payload, [c.as_dict() for c in commits], systems.context(sid),
+                                             repo=sys_repo, knowledge_file=systems.knowledge_file(sid))
+                valid = {i["id"] for i in open_issues}
+                threshold = _CONF_RANK.get(settings.commit_match_min_confidence, 2)
+                for m in matching.matches:
+                    if m.issue_id not in valid:
+                        continue
+                    if _CONF_RANK[m.confidence] >= threshold:
+                        resolve_issue(db, m.issue_id, m.how_fixed, m.where, now, commits=m.commit_hashes, auto=True)
+                        res.resolved.append(m.issue_id)
+                    elif m.confidence == "medium":
+                        res.suggestions.append(
+                            f"#{m.issue_id}（{systems.name(sid)}）可能已由 {', '.join(m.commit_hashes)} 處理：{m.reason}\n"
+                            f"確認的話回：/resolve {m.issue_id} {m.how_fixed} | {m.where}")
+            if commits:
+                db.set_kv(key, commits[-1].hash)
+            elif last is None:
+                db.set_kv(key, sys_repo.head())
         res.admin_summary = _admin_sync_summary(db, res)
         return res
 
 
 def _admin_sync_summary(db: DB, res: SyncResult) -> str:
-    lines = [f"🔧 新 commit {res.commits} 個"]
+    lines = [f"🔧 新 commit {res.commits} 個"
+             + (f"（{'、'.join(f'{n} {c} 個' for n, c in res.per_system)}）" if res.per_system else "")]
+    if res.skipped:
+        lines.append(f"⚠️ 讀不到程式碼、略過：{'、'.join(res.skipped)}")
     if res.resolved:
         lines.append("自動標記完成：")
         for i in res.resolved:
@@ -372,17 +455,20 @@ class AnnounceResult:
     admin_summary: str = ""
 
 
-def prepare_announcements(db: DB, llm: LLM, settings: Settings, now: datetime | None = None) -> AnnounceResult:
+def prepare_announcements(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
+                          systems: Systems | None = None) -> AnnounceResult:
     now = now or now_in(settings)
     day = now.strftime("%Y-%m-%d")
     res = AnnounceResult(date=day)
+    systems = _resolve_systems(settings, None, systems)
     with RUN_LOCK:
         # ---- 成效評估：自上次評估後新完成的問題 ----
         since = db.get_kv("last_evaluation_at") or "0000"
         newly = db.issues_resolved_since(since)
         if newly:
             payload = [
-                {"issue_id": i["id"], "title": i["title"], "status": i["status"], "summary": i["summary"],
+                {"issue_id": i["id"], "system": systems.name(i.get("system_id")), "title": i["title"],
+                 "status": i["status"], "summary": i["summary"],
                  "companies": [db.group_label(g) for g in db.issue_groups(i["id"])],
                  "feedback": _feedback_payload(db, i["id"]),
                  "resolution_note": i["resolution_note"], "resolution_location": i["resolution_location"],
@@ -403,6 +489,7 @@ def prepare_announcements(db: DB, llm: LLM, settings: Settings, now: datetime | 
             for i in todo:
                 mine = [f for f in db.issue_feedback(i["id"]) if f["group_id"] == g["id"]]
                 items.append({
+                    "system": systems.name(i.get("system_id")),
                     "problem": i["title"],
                     "what_users_said": [{"reporter": f["reporter"], "detail": f["detail"]} for f in mine],
                     "how_fixed": i["resolution_note"],

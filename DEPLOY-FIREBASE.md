@@ -203,6 +203,61 @@ gcloud run services update feedbackbot --region $REGION --update-env-vars ADMIN_
 
 ---
 
+## 加入其他系統（多系統）
+
+機器人可以同時服務多套系統。每筆回饋會先判斷屬於**哪一個系統**，再到**那個系統的程式碼**分析怎麼改。
+
+系統清單寫在 `systems.json`（代號、名稱、說明、Bitbucket repo），裡面不放任何密碼。
+**說明寫得越清楚（主要功能、常見用詞），AI 越能判斷正確。**
+
+每個系統的程式碼讀取權杖，要分別存成金鑰：
+
+**① 每個 repo 各建一組唯讀權杖**
+
+到該 repo 的 Repository settings → Security → Access tokens → 建立，只勾「存放庫 → 讀取」，**只複製權杖本身**（不用組網址）。
+`becca0330` 底下的 repo（hcare、pd-ai-system），要請該 repo 的管理者（Becca）建立。
+
+**② 存成金鑰**（每一行貼上對應 repo 的權杖）
+
+```bash
+add_secret() { printf '%s 的值：' "$1"; read -rs V; echo; printf '%s' "$V" | gcloud secrets create "$1" --data-file=-; unset V; }
+add_secret repo-token-hcare
+add_secret repo-token-pd-ai
+add_secret repo-token-children-care
+add_secret repo-token-health-passbook
+add_secret repo-token-pharma-journal
+```
+
+**③ 讓程式讀得到這些金鑰**
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+SA=${PROJECT_NUMBER}-compute@developer.gserviceaccount.com
+for s in repo-token-hcare repo-token-pd-ai repo-token-children-care repo-token-health-passbook repo-token-pharma-journal; do
+  gcloud secrets add-iam-policy-binding $s --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor --quiet >/dev/null && echo "✅ $s"
+done
+```
+
+**④ 部署新版程式，並接上這些金鑰**
+
+```bash
+cd ~/feedback-bot && git pull
+gcloud run deploy feedbackbot --source . --region $REGION \
+  --update-secrets "REPO_TOKEN_HCARE=repo-token-hcare:latest,REPO_TOKEN_PD_AI=repo-token-pd-ai:latest,REPO_TOKEN_CHILDREN_CARE=repo-token-children-care:latest,REPO_TOKEN_HEALTH_PASSBOOK=repo-token-health-passbook:latest,REPO_TOKEN_PHARMA_JOURNAL=repo-token-pharma-journal:latest"
+```
+
+日照系統沿用原本的 `repo-url`，不用改。
+
+**⑤ 在後台設定每個群組用哪些系統**
+
+後台「單位」→ 點群組 → 勾選這個單位使用的系統 →「儲存系統」。
+例如「南老兒童之家」群組勾「兒童之家系統」。都不勾的話，AI 會從全部系統中判斷。
+
+**⑥ 確認**
+
+私訊機器人 `/sync`。回覆中如果出現「⚠️ 讀不到程式碼、略過：…」，代表那幾個系統的權杖有問題。
+還沒有權杖的系統也能收集與分類回饋，只是分析時不會查程式碼，也不會自動配對 commit。
+
 ## 之後要更新程式
 
 ```bash

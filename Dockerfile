@@ -9,12 +9,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY feedbackbot ./feedbackbot
+COPY systems.json ./systems.json
 
 # Cloud Run 預設值：Firestore、外部排程、暫存資料夾
 ENV PYTHONUNBUFFERED=1 \
     DB_BACKEND=firestore \
     ENABLE_SCHEDULER=false \
     REPO_PATH=/tmp/system-repo \
+    REPOS_DIR=/tmp/system-repos \
     DATA_DIR=/tmp/data
 
 CMD ["sh", "-c", "exec uvicorn feedbackbot.app:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips='*'"]

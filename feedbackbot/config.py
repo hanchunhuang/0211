@@ -44,6 +44,10 @@ class Settings:
         default_factory=lambda: [x.strip() for x in os.getenv("STAFF_USER_IDS", "").split(",") if x.strip()]
     )
     # ---- 被回饋的系統程式碼（唯讀 git clone）----
+    # 系統清單（每個系統的名稱、說明、Bitbucket repo）。檔案不存在時視為單一系統
+    systems_file: str = field(default_factory=lambda: os.getenv("SYSTEMS_FILE", "systems.json"))
+    # 各系統程式碼 clone 到這個資料夾底下（每個系統一個子資料夾）
+    repos_dir: str = field(default_factory=lambda: os.getenv("REPOS_DIR", "./repos"))
     repo_path: str = field(default_factory=lambda: os.getenv("REPO_PATH", ""))
     # 選填：REPO_PATH 不存在時，用這個網址自動 clone（Cloud Run 這類沒有永久磁碟的環境用）
     repo_url: str = field(default_factory=lambda: os.getenv("REPO_URL", ""))
