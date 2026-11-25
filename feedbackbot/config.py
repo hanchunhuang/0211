@@ -65,6 +65,8 @@ class Settings:
     # 對外網址（例如 https://feedback.hokiya.com），用於後台登入 cookie 與表單來源檢查
     public_base_url: str = field(default_factory=lambda: os.getenv("PUBLIC_BASE_URL", "").rstrip("/"))
     session_secret: str = field(default_factory=lambda: os.getenv("SESSION_SECRET", ""))
+    # 選填：這個服務自己的 Cloud Run 網址（不填會自動偵測）
+    self_url: str = field(default_factory=lambda: os.getenv("SELF_URL", "").rstrip("/"))
     # ---- 排程 ----
     # true：程式內建排程（一般主機）；false：由外部（Cloud Scheduler）呼叫 /tasks/*
     enable_scheduler: bool = field(default_factory=lambda: _bool(os.getenv("ENABLE_SCHEDULER"), True))

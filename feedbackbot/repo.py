@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -56,12 +57,16 @@ class CodeRepo:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 branch = ["--branch", self.branch] if self.branch else []  # 沒指定就用 repo 的預設分支
+                started = time.time()
+                log.info("開始下載程式碼：%s", self.path.name)
                 r = subprocess.run(["git", "clone", "--quiet", f"--depth={self.CLONE_DEPTH}", *branch,
                                     self.url, str(self.path)], capture_output=True, text=True, timeout=600)
                 if r.returncode != 0:
                     # 錯誤訊息可能含網址（裡面有 Token），只記錄前段且遮蔽
-                    log.error("clone 失敗：%s", r.stderr.replace(self.url, "<REPO_URL>")[:300])
+                    log.error("clone 失敗（%s）：%s", self.path.name, r.stderr.replace(self.url, "<REPO_URL>")[:300])
                     self._clone_failed = True
+                else:
+                    log.info("下載完成：%s（%.0f 秒）", self.path.name, time.time() - started)
             except (OSError, subprocess.SubprocessError):
                 log.exception("clone 失敗")
                 self._clone_failed = True

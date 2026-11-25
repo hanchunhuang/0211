@@ -43,6 +43,8 @@ class Bot:
         self.systems = Systems.single(self.s, repo) if repo is not None else Systems.from_settings(self.s)
         self.tz = ZoneInfo(self.s.timezone)
         self._names: dict[tuple[str, str], str] = {}
+        # 這個服務自己的 Cloud Run 網址（第一次收到請求時記下），長時間工作用來呼叫自己
+        self.self_url: str | None = self.s.self_url or None
 
     def now(self) -> datetime:
         return datetime.now(self.tz)
@@ -223,12 +225,29 @@ class Bot:
         cmd = text.split()[0].lower()
         ctx = commands.Ctx(db=self.db, line=self.line, now=self.now, group_id=group_id, systems=self.systems,
                            run_digest=self.job_digest, run_announce=self.job_announce, run_sync=self.job_sync)
-        if cmd in ("/today", "/announce", "/sync"):
-            # 需要呼叫 AI，時間較長：先回覆，再在背景執行，完成後推播給管理者
+        if cmd in LONG_JOBS:
+            # 時間較長：先回覆，再執行，完成後推播給管理者
             self.line.reply(reply_token, "⏳ 處理中，完成後會私訊通知你…")
-            threading.Thread(target=commands.handle, args=(ctx, text), daemon=True).start()
+            threading.Thread(target=self._run_long, args=(LONG_JOBS[cmd], ctx, text), daemon=True).start()
             return
         self.line.reply(reply_token, commands.handle(ctx, text))
+
+    def _run_long(self, job: str, ctx, text: str) -> None:
+        """長時間工作：在 Cloud Run 上改成呼叫自己的 /tasks/<job>。
+        對 Cloud Run 來說那是一個進行中的請求，工作做完前不會把機器關掉；
+        若單純在背景執行緒跑，閒置一段時間後機器可能被關閉，工作就中斷了。"""
+        if self.self_url and self.s.task_token:
+            try:
+                r = httpx.post(f"{self.self_url}/tasks/{job}", headers={"x-task-token": self.s.task_token},
+                               timeout=3600)
+                if r.status_code == 200:
+                    return
+                log.warning("呼叫 /tasks/%s 失敗（HTTP %s），改在背景執行", job, r.status_code)
+            except httpx.TimeoutException:
+                return  # 伺服器端仍在執行，完成後會自己通知
+            except Exception:  # noqa: BLE001
+                log.exception("呼叫 /tasks/%s 失敗，改在背景執行", job)
+        commands.handle(ctx, text)
 
     # ---------------- 排程 ----------------
     def start_scheduler(self) -> BackgroundScheduler:
@@ -293,6 +312,8 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
     @api.post("/callback")
     async def callback(request: Request, background: BackgroundTasks) -> dict:
         b = get_bot()
+        if not b.self_url and request.url.hostname and request.url.hostname.endswith(".run.app"):
+            b.self_url = f"https://{request.url.hostname}"
         body = await request.body()
         if not verify_signature(b.s.line_channel_secret, body, request.headers.get("x-line-signature")):
             raise HTTPException(status_code=400, detail="invalid signature")
@@ -302,6 +323,9 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
         return {"ok": True}  # LINE 要求盡快回 200
 
     return api
+
+
+LONG_JOBS = {"/today": "digest", "/sync": "sync", "/announce": "announce"}
 
 
 def _as_command(text: str) -> str:

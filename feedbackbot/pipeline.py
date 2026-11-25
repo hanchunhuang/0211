@@ -381,6 +381,7 @@ def sync_commits(db: DB, llm: LLM, settings: Settings, repo: CodeRepo | None = N
     systems = _resolve_systems(settings, repo, systems)
     with RUN_LOCK:
         for sid in systems.ids():
+            log.info("讀取 commit：%s", sid)
             sys_repo = systems.repo(sid)
             if sys_repo is None or not sys_repo.exists():
                 res.skipped.append(systems.name(sid))
@@ -423,6 +424,7 @@ def sync_commits(db: DB, llm: LLM, settings: Settings, repo: CodeRepo | None = N
             elif last is None:
                 db.set_kv(key, sys_repo.head())
         res.admin_summary = _admin_sync_summary(db, res)
+        log.info("commit 配對完成：%d 個 commit，自動完成 %d 個問題", res.commits, len(res.resolved))
         return res
 
 

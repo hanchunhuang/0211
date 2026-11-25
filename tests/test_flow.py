@@ -489,3 +489,26 @@ def test_direct_message_feedback(env):
     assert "/help" in line.replies[-1]
     post(client, text_ev(None, ADMIN, " ／issues "))
     assert "沒有未完成的問題" in line.replies[-1]
+
+
+def test_long_command_runs_through_task_endpoint(env, monkeypatch):
+    """在 Cloud Run 上，/sync 等長時間指令改呼叫自己的 /tasks/*，避免機器中途被關掉。"""
+    import feedbackbot.app as appmod
+    bot, line, client = env
+    bot.s.task_token = "tok"
+    bot.self_url = "https://feedbackbot-x.a.run.app"
+    called = []
+
+    def fake_post(url, headers=None, timeout=None, **kw):
+        called.append(url)
+        job = url.rsplit("/", 1)[1]
+        return client.post(f"/tasks/{job}", headers=headers)
+
+    monkeypatch.setattr(appmod.httpx, "post", fake_post)
+    ran = []
+    monkeypatch.setattr(appmod.threading, "Thread",
+                        lambda target, args, daemon: type("T", (), {"start": lambda self: ran.append(target(*args))})())
+    post(client, text_ev(None, ADMIN, "/sync"))
+    assert "處理中" in line.replies[-1]
+    assert called == ["https://feedbackbot-x.a.run.app/tasks/sync"]
+    assert any("commit" in t for _, t in line.pushes)   # /tasks/sync 完成後通知管理者
