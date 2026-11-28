@@ -4,8 +4,8 @@
 <h1>問題</h1>
 <form class="filters" method="get">
   <select name="status" aria-label="狀態">
-    <option value="open" {{ 'selected' if status == 'open' }}>未完成</option>
-    {% for k, v in STATUS_ZH.items() %}<option value="{{ k }}" {{ 'selected' if status == k }}>{{ v }}</option>{% endfor %}
+    <option value="open" {{ 'selected' if status == 'open' }}>未完成（全部）</option>
+    {% for k, v in STATUS_ZH.items() %}{% set val = 'status_open' if k == 'open' else k %}<option value="{{ val }}" {{ 'selected' if status == val }}>{{ v }}</option>{% endfor %}
     <option value="all" {{ 'selected' if status == 'all' }}>全部</option>
   </select>
   <select name="scope" aria-label="範圍"><option value="">共同＋單一</option>

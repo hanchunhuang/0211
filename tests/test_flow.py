@@ -661,3 +661,17 @@ def test_manual_mode_collaboration_and_unit_report(env):
     csv_text = client.get("/admin/unit-report.csv?period=month&date=2026-11").content.decode("utf-8-sig")
     assert "詢問" in csv_text and "已解決" in csv_text and "Becca" in csv_text
     assert client.get("/admin/unit-report?period=month&date=bad").status_code == 200
+
+
+def test_issue_status_filter(env):
+    bot, line, client = env
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"), text_ev(GA, "U3", "可以加庫存提醒嗎"))
+    pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))   # 測試預設會自動分析
+    stock = issue_by_title(bot, "低庫存提醒")
+    bot.db.update_issue(stock["id"], datetime(2026, 11, 22, tzinfo=TZ), status="open")
+    bot.s.admin_web_password = "pw"
+    client.post("/admin/login", data={"password": "pw"}, headers={"origin": "http://testserver"})
+    all_open = client.get("/admin/issues?status=open").text
+    only_open = client.get("/admin/issues?status=status_open").text
+    assert "匯出缺出貨日期" in all_open and "低庫存提醒" in all_open
+    assert "低庫存提醒" in only_open and "匯出缺出貨日期" not in only_open

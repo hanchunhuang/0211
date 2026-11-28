@@ -535,8 +535,11 @@ def issue_list(data: Snapshot, db, status: str, kind: str, scope: str, group: st
     for i in data.issues:
         if system and (i.get("system_id") or "unknown") != system:
             continue
-        if status == "open":
+        if status == "open":                    # 未完成（全部）
             if i["status"] in CLOSED:
+                continue
+        elif status == "status_open":           # 狀態剛好是「待處理」
+            if i["status"] != "open":
                 continue
         elif status in STATUS_ZH and i["status"] != status:
             continue
