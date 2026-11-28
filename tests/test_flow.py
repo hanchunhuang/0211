@@ -506,9 +506,7 @@ def test_long_command_runs_through_task_endpoint(env, monkeypatch):
         return client.post(f"/tasks/{job}", headers=headers)
 
     monkeypatch.setattr(appmod.httpx, "post", fake_post)
-    ran = []
-    monkeypatch.setattr(appmod.threading, "Thread",
-                        lambda target, args, daemon: type("T", (), {"start": lambda self: ran.append(target(*args))})())
+    monkeypatch.setattr(appmod, "_spawn", lambda fn, *args: fn(*args))
     post(client, text_ev(None, ADMIN, "/sync"))
     assert "處理中" in line.replies[-1]
     assert called == ["https://feedbackbot-x.a.run.app/tasks/sync"]
@@ -579,8 +577,7 @@ def test_manual_analysis(env, monkeypatch):
     import feedbackbot.app as appmod
     bot, line, client = env
     bot.s.auto_analyze = False
-    monkeypatch.setattr(appmod.threading, "Thread",
-                        lambda target, args, daemon: type("T", (), {"start": lambda self: target(*args)})())
+    monkeypatch.setattr(appmod, "_spawn", lambda fn, *args: fn(*args))
     post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"), text_ev(GA, "U3", "希望有庫存提醒"))
     res = pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
     assert bot.llm.analyzed == []

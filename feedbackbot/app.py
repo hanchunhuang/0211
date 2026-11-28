@@ -100,7 +100,7 @@ class Bot:
 
     def start_job(self, job: str) -> None:
         """在背景啟動長時間工作（Cloud Run 上會改呼叫自己的 /tasks/<job>）。"""
-        threading.Thread(target=self._run_long, args=(job, None, None), daemon=True).start()
+        _spawn(self._run_long, job, None, None)
 
     def job_announce(self) -> str:
         sync_msg = self.job_sync(notify=False)
@@ -256,7 +256,7 @@ class Bot:
         if cmd in LONG_JOBS:
             # 時間較長：先回覆，再執行，完成後推播給管理者
             self.line.reply(reply_token, "⏳ 處理中，完成後會私訊通知你…")
-            threading.Thread(target=self._run_long, args=(LONG_JOBS[cmd], ctx, text), daemon=True).start()
+            _spawn(self._run_long, LONG_JOBS[cmd], ctx, text)
             return
         self.line.reply(reply_token, commands.handle(ctx, text))
 
@@ -358,6 +358,11 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
         return {"ok": True}  # LINE 要求盡快回 200
 
     return api
+
+
+def _spawn(fn, *args) -> None:
+    """在背景執行（測試時可替換成同步執行）。"""
+    threading.Thread(target=fn, args=args, daemon=True).start()
 
 
 LONG_JOBS = {"/today": "digest", "/sync": "sync", "/announce": "announce"}
