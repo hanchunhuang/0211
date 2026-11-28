@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import hmac
 import json
 import secrets
@@ -14,7 +16,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -119,7 +121,8 @@ def build_router(get_bot: Callable) -> APIRouter:
     def render(request: Request, template: str, **ctx) -> HTMLResponse:
         systems = get_bot().systems
         return TEMPLATES.TemplateResponse(request, template, {
-            "nav": template.split(".")[0], "sysname": systems.name, "sys_options": systems.options(), **ctx})
+            "nav": template.split(".")[0], "sysname": systems.name, "sys_options": systems.options(),
+            "code_analysis": get_bot().s.code_analysis, **ctx})
 
     def back(url: str) -> RedirectResponse:
         return RedirectResponse(url, status_code=303)
@@ -252,6 +255,8 @@ def build_router(get_bot: Callable) -> APIRouter:
     @r.get("/issues/{iid}", response_class=HTMLResponse)
     def issue_detail(request: Request, iid: int):
         db = get_bot().db
+        author = unquote(request.cookies.get("fbot_author", ""))
+        others = [x for x in db.all_issues() if x["id"] != iid and x["status"] != "merged"]
         i = db.issue(iid)
         if not i:
             raise HTTPException(404)
@@ -264,11 +269,94 @@ def build_router(get_bot: Callable) -> APIRouter:
         return render(request, "issue.html", i=i, by_group=by_group, source=db.messages_by_ids(msg_ids), anns=anns,
                       analysis=json.loads(i["analysis"]) if i.get("analysis") else None,
                       commits=json.loads(i.get("fix_commits") or "[]"), label=db.group_label,
-                      fix_prompt=pipeline.fix_prompt(db, get_bot().systems, iid))
+                      fix_prompt=pipeline.fix_prompt(db, get_bot().systems, iid),
+                      notes=json.loads(i.get("notes") or "[]"), author=author, others=others)
+
+    @r.post("/issues/{iid}/edit")
+    def issue_edit(iid: int, title: str = Form(...), summary: str = Form(""), kind: str = Form(...),
+                   system: str = Form(...), priority: str = Form(""), module: str = Form(""),
+                   assignee: str = Form("")):
+        bot = get_bot()
+        i = bot.db.issue(iid)
+        if not i:
+            raise HTTPException(404)
+        if kind not in KIND_ZH or not bot.systems.valid(system) or priority not in ("", "P0", "P1", "P2", "P3"):
+            raise HTTPException(400, "欄位內容不正確")
+        fields = {"title": title.strip()[:200] or i["title"], "summary": summary.strip(), "kind": kind,
+                  "priority": priority or None, "module": module.strip() or None, "assignee": assignee.strip() or None}
+        if system != i.get("system_id"):
+            fields["system_id"] = system
+            for f in bot.db.issue_feedback(iid):
+                bot.db.s.update("feedback", f["id"], {"system_id": system})
+        bot.db.update_issue(iid, bot.now(), **fields)
+        return back(f"/admin/issues/{iid}")
+
+    @r.post("/issues/{iid}/note")
+    def issue_note(iid: int, request: Request, author: str = Form(""), text: str = Form(...)):
+        bot = get_bot()
+        if not bot.db.issue(iid):
+            raise HTTPException(404)
+        if text.strip():
+            bot.db.add_issue_note(iid, author.strip()[:40] or "（未署名）", text.strip()[:2000], bot.now())
+        resp = back(f"/admin/issues/{iid}#notes")
+        if author.strip():  # 記住署名，下次不用再打
+            resp.set_cookie("fbot_author", quote(author.strip()[:40]), max_age=365 * 86400, httponly=True,
+                            secure=_is_https(request, bot.s), samesite="lax", path="/admin")
+        return resp
+
+    @r.post("/issues/{iid}/merge")
+    def issue_merge(iid: int, target: int = Form(...), author: str = Form("")):
+        bot = get_bot()
+        err = pipeline.merge_issues(bot.db, iid, target, bot.now(), author)
+        if err:
+            raise HTTPException(400, err)
+        return back(f"/admin/issues/{target}")
+
+    @r.post("/feedback/{fid}/move")
+    def feedback_move(fid: int, target: str = Form(...)):
+        bot = get_bot()
+        f = bot.db.s.get("feedback", fid)
+        if not f:
+            raise HTTPException(404)
+        if target == "new":
+            new_id = pipeline.split_feedback(bot.db, fid, bot.now())
+            return back(f"/admin/issues/{new_id}")
+        if not target.isdigit() or not bot.db.issue(int(target)) or bot.db.issue(int(target))["status"] == "merged":
+            raise HTTPException(400, "目標問題編號不正確")
+        bot.db.move_feedback(fid, int(target))
+        return back(f"/admin/issues/{int(target)}")
+
+    # ------------------------------------------------------------ 單位報表（每天／每月）
+    @r.get("/unit-report", response_class=HTMLResponse)
+    def unit_report(request: Request, period: str = "month", date: str = "", group: str = ""):
+        bot = get_bot()
+        rep = build_unit_report(bot.db, bot.systems, bot.now(), period, date, group)
+        return render(request, "unit_report.html", rep=rep, groups=bot.db.groups(), group=group,
+                      label=bot.db.group_label)
+
+    @r.get("/unit-report.csv")
+    def unit_report_csv(period: str = "month", date: str = "", group: str = ""):
+        bot = get_bot()
+        rep = build_unit_report(bot.db, bot.systems, bot.now(), period, date, group)
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["區塊", "單位", "日期", "問題編號", "系統", "類型", "標題", "內容／怎麼改", "提出者／位置", "目前狀態", "負責人"])
+        for u in rep["units"]:
+            for x in u["asked"]:
+                w.writerow(["詢問", u["label"], x["date"], x["issue_id"] or "", x["system"], x["kind"], x["title"],
+                            x["detail"], x["reporter"], x["status"], x["assignee"]])
+            for x in u["solved"]:
+                w.writerow(["已解決", u["label"], x["date"], x["id"], x["system"], x["kind"], x["title"],
+                            x["note"], x["where"], "已完成", x["assignee"]])
+        name = f"unit-report-{rep['key']}.csv"
+        return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @r.post("/issues/{iid}/analyze")
     def issue_analyze(iid: int):
         bot = get_bot()
+        if not bot.s.code_analysis:
+            raise HTTPException(400, "目前是手動模式，沒有開啟程式分析（CODE_ANALYSIS）")
         err = pipeline.request_analysis(bot.db, iid, bot.now())
         if err:
             raise HTTPException(400, err)
@@ -473,3 +561,71 @@ def _mark_used(msgs: list[dict], feedback: list[dict]) -> None:
             used[m] = f["id"]
     for m in msgs:
         m["feedback_id"] = used.get(m["id"])
+
+
+# ====================================================================== 單位報表
+
+
+def _period(now: datetime, period: str, date: str) -> tuple[str, str, str, str]:
+    """回傳 (period, key, 開始日, 結束日)；日期都是 YYYY-MM-DD，結束日不含。"""
+    if period == "day":
+        try:
+            d = datetime.strptime(date, "%Y-%m-%d").date() if date else now.date()
+        except ValueError:
+            d = now.date()
+        return "day", d.isoformat(), d.isoformat(), (d + timedelta(days=1)).isoformat()
+    try:
+        y, m = (int(x) for x in (date or now.strftime("%Y-%m"))[:7].split("-"))
+        datetime(y, m, 1)
+    except ValueError:
+        y, m = now.year, now.month
+    ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+    return "month", f"{y:04d}-{m:02d}", f"{y:04d}-{m:02d}-01", f"{ny:04d}-{nm:02d}-01"
+
+
+def build_unit_report(db, systems, now: datetime, period: str, date: str, group: str = "") -> dict:
+    """各單位在某一天／某個月：詢問了哪些問題、解決了哪些問題。"""
+    period, key, start, end = _period(now, period, date)
+    issues = {i["id"]: i for i in db.all_issues()}
+
+    def final(iid):  # 合併過的問題，追到最後的那一個
+        seen = set()
+        while iid in issues and issues[iid]["status"] == "merged" and iid not in seen:
+            seen.add(iid)
+            iid = issues[iid].get("merged_into")
+        return issues.get(iid)
+
+    feedback = db.all_feedback()
+    units = []
+    for g in db.groups():
+        if group and g["id"] != group:
+            continue
+        mine = [f for f in feedback if f["group_id"] == g["id"]]
+        asked = []
+        for f in mine:
+            d = (f.get("asked_at") or f["digest_date"])[:10]
+            if start <= d < end:
+                iss = final(f.get("issue_id")) if f.get("issue_id") else None
+                asked.append({
+                    "date": d, "issue_id": iss["id"] if iss else None, "system": systems.name(f.get("system_id")),
+                    "kind": KIND_ZH.get(f["kind"], f["kind"]), "title": f["title"], "detail": f["detail"],
+                    "reporter": f.get("reporter") or "", "status": STATUS_ZH.get(iss["status"], "") if iss else "",
+                    "assignee": (iss or {}).get("assignee") or "",
+                })
+        my_issue_ids = {final(f["issue_id"])["id"] for f in mine if f.get("issue_id") and final(f["issue_id"])}
+        solved = []
+        for iid in sorted(my_issue_ids):
+            i = issues[iid]
+            d = (i.get("resolved_at") or "")[:10]
+            if i["status"] == "resolved" and start <= d < end:
+                solved.append({"id": iid, "date": d, "system": systems.name(i.get("system_id")),
+                               "kind": KIND_ZH.get(i["kind"], i["kind"]), "title": i["title"],
+                               "note": i.get("resolution_note") or "", "where": i.get("resolution_location") or "",
+                               "assignee": i.get("assignee") or ""})
+        still_open = sum(1 for iid in my_issue_ids if issues[iid]["status"] not in CLOSED)
+        if asked or solved or group:
+            units.append({"id": g["id"], "label": db.group_label(g["id"]), "asked": sorted(asked, key=lambda x: x["date"]),
+                          "solved": solved, "open": still_open})
+    units.sort(key=lambda u: (-len(u["asked"]), u["label"]))
+    return {"period": period, "key": key, "start": start, "end": end, "units": units,
+            "total_asked": sum(len(u["asked"]) for u in units), "total_solved": sum(len(u["solved"]) for u in units)}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}單位報表｜回饋後台{% endblock %}
+{% block body %}
+<h1>單位報表</h1>
+<form class="filters" method="get" id="rf">
+  <select name="period" aria-label="期間" onchange="document.getElementById('d').type = this.value === 'day' ? 'date' : 'month'; document.getElementById('d').value=''">
+    <option value="month" {{ 'selected' if rep.period == 'month' }}>每月</option>
+    <option value="day" {{ 'selected' if rep.period == 'day' }}>每天</option>
+  </select>
+  <input id="d" type="{{ 'date' if rep.period == 'day' else 'month' }}" name="date" value="{{ rep.key }}" aria-label="日期">
+  <select name="group" aria-label="單位"><option value="">全部單位</option>
+    {% for g in groups %}<option value="{{ g.id }}" {{ 'selected' if g.id == group }}>{{ label(g.id) }}</option>{% endfor %}</select>
+  <button>查詢</button>
+  <a href="/admin/unit-report.csv?period={{ rep.period }}&date={{ rep.key }}&group={{ group }}">⬇ 下載 CSV（Excel 可開）</a>
+</form>
+
+<div class="tiles">
+  <div class="card tile"><div class="v">{{ rep.total_asked }}</div><div class="k">{{ rep.key }} 提出的問題（筆）</div></div>
+  <div class="card tile"><div class="v">{{ rep.total_solved }}</div><div class="k">{{ rep.key }} 解決的問題</div></div>
+  <div class="card tile"><div class="v">{{ rep.units | length }}</div><div class="k">有提問或解決的單位</div></div>
+</div>
+
+{% if rep.units and not group %}
+<h2>各單位總表</h2>
+<div class="card scroll"><table>
+  <tr><th>單位</th><th class="n">提出</th><th class="n">解決</th><th class="n">目前未解決（累計）</th></tr>
+  {% for u in rep.units %}<tr><td class="nowrap"><a href="#u-{{ u.id }}">{{ u.label }}</a></td><td class="n">{{ u.asked | length }}</td>
+    <td class="n">{{ u.solved | length }}</td><td class="n">{{ u.open }}</td></tr>{% endfor %}
+</table></div>
+{% endif %}
+
+{% for u in rep.units %}
+<h2 id="u-{{ u.id }}">{{ u.label }}</h2>
+<div class="card scroll" style="margin-bottom:10px">
+  <strong>提出的問題（{{ u.asked | length }}）</strong>
+  {% if u.asked %}<table style="margin-top:6px">
+    <tr><th>日期</th><th>提出者</th><th>系統</th><th>類型</th><th>內容</th><th>問題</th><th>狀態</th><th>負責人</th></tr>
+    {% for x in u.asked %}<tr><td class="sub nowrap">{{ x.date }}</td><td class="nowrap">{{ x.reporter }}</td><td class="sub nowrap">{{ x.system }}</td>
+      <td class="nowrap">{{ x.kind }}</td><td class="title-col"><strong>{{ x.title }}</strong><div class="msg sub">{{ x.detail }}</div></td>
+      <td>{% if x.issue_id %}<a href="/admin/issues/{{ x.issue_id }}">#{{ x.issue_id }}</a>{% endif %}</td>
+      <td class="nowrap">{{ x.status }}</td><td class="nowrap sub">{{ x.assignee }}</td></tr>{% endfor %}
+  </table>{% else %}<div class="empty">這段期間沒有提出問題。</div>{% endif %}
+</div>
+<div class="card scroll" style="margin-bottom:10px">
+  <strong>解決的問題（{{ u.solved | length }}）</strong>
+  {% if u.solved %}<table style="margin-top:6px">
+    <tr><th>解決日</th><th>問題</th><th>系統</th><th>怎麼改的</th><th>在哪裡</th><th>負責人</th></tr>
+    {% for x in u.solved %}<tr><td class="sub nowrap">{{ x.date }}</td><td class="title-col"><a href="/admin/issues/{{ x.id }}">#{{ x.id }} {{ x.title }}</a></td>
+      <td class="sub nowrap">{{ x.system }}</td><td class="msg">{{ x.note }}</td><td class="sub">{{ x.where }}</td><td class="nowrap sub">{{ x.assignee }}</td></tr>{% endfor %}
+  </table>{% else %}<div class="empty">這段期間沒有解決的問題。</div>{% endif %}
+  <p class="sub" style="margin-bottom:0">這個單位目前還有 {{ u.open }} 個未解決的問題。</p>
+</div>
+{% else %}
+<div class="card empty">{{ rep.key }} 沒有任何單位提出或解決問題。</div>
+{% endfor %}
+{% endblock %}

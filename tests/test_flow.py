@@ -133,6 +133,7 @@ def env(tmp_path, request):
     s.systems_file = str(tmp_path / "no-systems.json")   # 預設單一系統；多系統另有測試
     s.repo_auto_update = False
     s.auto_analyze = True   # 原本的測試假設自動分析；手動分析另有測試
+    s.code_analysis = True  # 原本的測試假設會讀程式碼；手動模式另有測試
     line = FakeLine()
     bot = Bot(settings=s, db=_make_db(request.param), line=line, llm=FakeLLM())
     client = TestClient(create_app(bot, start_scheduler=False))
@@ -545,7 +546,7 @@ def test_fix_prompt(env):
     bot.s.admin_web_password = "pw"
     client.post("/admin/login", data={"password": "pw"}, headers={"origin": "http://testserver"})
     r = client.get(f"/admin/issues/{iid}")
-    assert "複製修改指示" in r.text and "初步分析" in r.text
+    assert "複製問題說明" in r.text and "初步分析" in r.text
 
 
 def test_summary_only_group(env):
@@ -582,7 +583,7 @@ def test_manual_analysis(env, monkeypatch):
     res = pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
     assert bot.llm.analyzed == []
     export, stock = issue_by_title(bot, "匯出缺出貨日期"), issue_by_title(bot, "低庫存提醒")
-    assert export["status"] == "open" and "/analyze" in bot.db.report(res.report_name)["content"]
+    assert export["status"] == "open"
     # LINE：/analyze 編號
     post(client, text_ev(None, ADMIN, f"/analyze {export['id']}"))
     assert "開始分析" in line.replies[-1]
@@ -599,3 +600,64 @@ def test_manual_analysis(env, monkeypatch):
     # 不存在的編號
     post(client, text_ev(None, ADMIN, "/analyze 999"))
     assert "找不到" in line.replies[-1]
+
+
+def test_manual_mode_collaboration_and_unit_report(env):
+    """手動模式：不讀程式碼；可編輯、合併、拆分問題、留備註；單位報表列出每天／每月的提問與解決。"""
+    bot, line, client = env
+    bot.s.code_analysis = False
+    bot.s.auto_analyze = False
+    ts = int(datetime(2026, 11, 21, 9, 0, tzinfo=TZ).timestamp() * 1000)
+    post(client, {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GA}},
+         {"type": "join", "timestamp": ts, "source": {"type": "group", "groupId": GB}})
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期", ts=datetime(2026, 11, 21, 10, 0, tzinfo=TZ)),
+         text_ev(GA, "U3", "可以加庫存提醒嗎", ts=datetime(2026, 11, 21, 10, 5, tzinfo=TZ)),
+         text_ev(GB, "U2", "匯出少了出貨日", ts=datetime(2026, 11, 21, 11, 0, tzinfo=TZ)))
+    res = pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
+    assert bot.llm.analyzed == []
+    assert "【甲公司-系統群】" in res.admin_summary and "【乙公司-系統群】" in res.admin_summary
+    post(client, text_ev(None, ADMIN, "/sync"))
+    assert "手動模式" in line.replies[-1]
+    post(client, text_ev(None, ADMIN, "/analyze 1"))
+    assert "手動模式" in line.replies[-1]
+
+    bot.s.admin_web_password = "pw"
+    origin = {"origin": "http://testserver"}
+    client.post("/admin/login", data={"password": "pw"}, headers=origin)
+    export, stock = issue_by_title(bot, "匯出缺出貨日期"), issue_by_title(bot, "低庫存提醒")
+    page = client.get(f"/admin/issues/{export['id']}").text
+    assert "分析這個問題" not in page and "編輯問題" in page and "協作備註" in page
+
+    # 編輯：標題、負責人、優先級
+    client.post(f"/admin/issues/{export['id']}/edit", headers=origin, data={
+        "title": "匯出報表缺出貨日期", "summary": "兩家都反映", "kind": "bug", "system": export["system_id"],
+        "priority": "P1", "module": "訂單", "assignee": "Becca"})
+    e = bot.db.issue(export["id"])
+    assert e["title"] == "匯出報表缺出貨日期" and e["assignee"] == "Becca" and e["priority"] == "P1"
+    # 備註（記住署名）
+    r = client.post(f"/admin/issues/{export['id']}/note", headers=origin, data={"author": "Eva", "text": "已和 Becca 討論"},
+                    follow_redirects=False)
+    assert "fbot_author" in r.headers["set-cookie"]
+    assert json.loads(bot.db.issue(export["id"])["notes"])[0]["author"] == "Eva"
+    assert 'value="Eva"' in client.get(f"/admin/issues/{export['id']}").text
+    # 把一筆回饋拆成新問題，再合併回去
+    fb_b = next(f for f in bot.db.issue_feedback(export["id"]) if f["group_id"] == GB)
+    r = client.post(f"/admin/feedback/{fb_b['id']}/move", data={"target": "new"}, headers=origin, follow_redirects=False)
+    new_id = int(r.headers["location"].rsplit("/", 1)[1])
+    assert len(bot.db.issue_feedback(export["id"])) == 1 and len(bot.db.issue_feedback(new_id)) == 1
+    client.post(f"/admin/issues/{new_id}/merge", data={"target": export["id"], "author": "Eva"}, headers=origin)
+    assert bot.db.issue(new_id)["status"] == "merged" and len(bot.db.issue_feedback(export["id"])) == 2
+    assert new_id not in [i["id"] for i in bot.db.open_issues()]
+
+    # 解決後，單位報表
+    post(client, text_ev(None, ADMIN, f"/resolve {export['id']} 匯出加上出貨日期 | 訂單 → 匯出"))
+    bot.db.update_issue(export["id"], datetime(2026, 11, 22, 9, 0, tzinfo=TZ), resolved_at="2026-11-22T09:00:00+08:00")
+    r = client.get("/admin/unit-report?period=month&date=2026-11")
+    assert "甲公司-系統群" in r.text and "乙公司-系統群" in r.text and "匯出加上出貨日期" in r.text
+    r = client.get(f"/admin/unit-report?period=day&date=2026-11-21&group={GA}")
+    assert "訂單匯出沒有出貨日期" in r.text and "可以加庫存提醒嗎" in r.text and "匯出少了出貨日" not in r.text
+    r = client.get("/admin/unit-report?period=day&date=2026-11-22")
+    assert "匯出加上出貨日期" in r.text and "訂單匯出沒有出貨日期" not in r.text   # 22 日：只有解決，沒有新提問
+    csv_text = client.get("/admin/unit-report.csv?period=month&date=2026-11").content.decode("utf-8-sig")
+    assert "詢問" in csv_text and "已解決" in csv_text and "Becca" in csv_text
+    assert client.get("/admin/unit-report?period=month&date=bad").status_code == 200

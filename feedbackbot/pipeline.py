@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 RUN_LOCK = threading.Lock()
 
 KIND_ZH = {"bug": "錯誤", "feature": "新需求", "usability": "操作不便", "question": "使用疑問"}
-STATUS_ZH = {"open": "待分析", "collected": "已歸納", "analyzed": "已分析", "in_progress": "修改中", "resolved": "已完成", "wontfix": "不處理"}
+STATUS_ZH = {"open": "待處理", "collected": "已歸納", "analyzed": "已分析", "merged": "已合併", "in_progress": "處理中", "resolved": "已完成", "wontfix": "不處理"}
 
 
 def now_in(settings: Settings) -> datetime:
@@ -101,14 +101,17 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
             valid_ids = {r["id"] for r in rows}
             cands = _group_candidates(db, systems, group_id)
             if any(r["kind"] in ("text", "image") for r in rows):
-                catalog = systems.catalog(only=cands, with_readme=len(cands) > 1)
+                # 手動模式不下載程式碼，只用 systems.json 的說明判斷系統
+                catalog = systems.catalog(only=cands, with_readme=settings.code_analysis and len(cands) > 1)
+                msg_time = {r["id"]: r["created_at"] for r in rows}
                 extraction = llm.extract(company, transcript, images[: settings.max_images_per_group], catalog)
                 for it in extraction.items:
                     ids = [i for i in it.message_ids if i in valid_ids]
                     sid = it.system if systems.valid(it.system) else (cands[0] if len(cands) == 1 else UNKNOWN)
+                    asked = min((msg_time[i] for i in ids), default=None)  # 實際提問時間（報表用）
                     db.add_feedback(group_id=group_id, message_ids=ids, reporter=it.reporter, kind=it.kind,
                                     title=it.title, detail=it.detail, severity=it.severity,
-                                    digest_date=day, now=now, system_id=sid)
+                                    digest_date=day, now=now, system_id=sid, asked_at=asked)
                     res.new_feedback += 1
             db.mark_processed([r["id"] for r in rows])
 
@@ -300,8 +303,6 @@ def _issue_md(db: DB, issue_id: int, today: str) -> str:
         if a.get("files_to_change"):
             out.append("  - 建議修改的檔案：")
             out += [f"    - `{f['path']}`：{f['change']}" for f in a["files_to_change"]]
-    elif i["status"] in ("open", "collected"):
-        out.append(f"- （尚未分析：要知道怎麼改，在後台問題頁按「分析這個問題」或私訊 `/analyze {i['id']}`）")
     if i["resolution_note"]:
         out.append(f"- 處理：{i['resolution_note']}｜{i['resolution_location'] or ''}")
     return "\n".join(out)
@@ -356,10 +357,9 @@ def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: dat
         "",
         "## 改完後怎麼標記",
         "",
-        "- 照平常一樣在該系統的程式庫 commit（`feat:`／`fix:` + 中文說明），隔天早上會自動配對到問題；",
-        "  commit 訊息裡寫 `#編號`（例如 `fix: … (#12)`）配對最準。",
-        "- 也可以 LINE 私訊機器人：`/resolve 編號 怎麼改的 | 在哪裡`",
-        "- AI 判斷錯系統時：後台問題頁可改系統，或私訊 `/system 編號 系統代號`，改完會重新分析。",
+        "- 後台問題頁：填「怎麼改的」與「在哪裡」後按「標記完成」",
+        "- 或 LINE 私訊機器人：`/resolve 編號 怎麼改的 | 在哪裡`",
+        "- 問題內容、系統、負責人都可以在後台直接編輯；重複的問題可以合併。",
         "",
     ]
     name = f"{res.date}-digest.md"
@@ -368,18 +368,22 @@ def _write_digest_report(db: DB, settings: Settings, res: DigestResult, now: dat
 
 
 def _admin_digest_summary(db: DB, res: DigestResult, systems: Systems) -> str:
+    """每晚私訊管理者：依單位列出今天提出的問題。"""
     if not res.touched_issue_ids:
         return f"📋 {res.date} 回饋日報：今天沒有新的系統回饋。"
-    lines = [f"📋 {res.date} 回饋日報", f"新回饋 {res.new_feedback} 筆，涉及 {len(res.touched_issue_ids)} 個問題", ""]
-    for sid, ids in _by_system(systems, res.touched_issue_ids, db):
-        lines.append(f"【{systems.name(sid)}】")
-        for i in sorted(ids, key=lambda x: not _is_common(db, x)):
+    today_fb = [f for f in db.all_feedback() if f["digest_date"] == res.date and f.get("issue_id")]
+    by_group: dict[str, set[int]] = {}
+    for f in today_fb:
+        by_group.setdefault(f["group_id"], set()).add(f["issue_id"])
+    lines = [f"📋 {res.date} 回饋日報", f"新回饋 {res.new_feedback} 筆，{len(by_group)} 個單位，涉及 {len(res.touched_issue_ids)} 個問題", ""]
+    for gid, iids in sorted(by_group.items(), key=lambda x: db.group_label(x[0])):
+        lines.append(f"【{db.group_label(gid)}】")
+        for i in sorted(iids):
             iss = db.issue(i)
             tag = "🔁" if _is_common(db, i) else "👤"
-            cos = "、".join(db.group_label(g) for g in db.issue_groups(i))
-            lines.append(f"{tag} #{i} [{iss['priority'] or '-'}] {iss['title']}（{cos}）")
+            lines.append(f"{tag} #{i} [{systems.name(iss.get('system_id'))}] {iss['title']}")
         lines.append("")
-    lines.append("🔁 共同問題　👤 單一單位\n看細節：/issue 編號　分析怎麼改：/analyze 編號")
+    lines.append("🔁 多個單位都提到　👤 只有這個單位\n後台可編輯、合併問題，並指定負責人。處理好後：/resolve 編號 怎麼改的 | 在哪裡")
     return "\n".join(lines)
 
 
@@ -435,6 +439,32 @@ def fix_prompt(db: DB, systems: Systems, issue_id: int) -> str:
         "5. 改完先讓我確認，不要自行 push。",
     ]
     return "\n".join(lines)
+
+
+def merge_issues(db: DB, source_id: int, target_id: int, now: datetime, author: str = "") -> str:
+    """把 source 的回饋全部併到 target，source 標記為已合併。回傳空字串＝成功；否則為原因。"""
+    src, dst = db.issue(source_id), db.issue(target_id)
+    if not src or not dst:
+        return "找不到問題編號"
+    if source_id == target_id:
+        return "不能合併到自己"
+    if dst["status"] == "merged":
+        return f"#{target_id} 已經併到 #{dst.get('merged_into')}，請改合併到那一個"
+    for f in db.issue_feedback(source_id):
+        db.move_feedback(f["id"], target_id)
+    db.update_issue(source_id, now, status="merged", merged_into=int(target_id))
+    db.add_issue_note(target_id, author or "系統", f"合併了 #{source_id}「{src['title']}」的回饋", now)
+    return ""
+
+
+def split_feedback(db: DB, feedback_id: int, now: datetime) -> int:
+    """把一筆回饋拆出來，成為新的問題。回傳新問題編號。"""
+    f = db.s.get("feedback", feedback_id)
+    if not f:
+        raise KeyError("回饋不存在")
+    iid = db.create_issue(f["title"], f["kind"], f["detail"], None, now, system_id=f.get("system_id") or UNKNOWN)
+    db.move_feedback(feedback_id, iid)
+    return iid
 
 
 def set_issue_system(db: DB, issue_id: int, system_id: str, now: datetime) -> bool:

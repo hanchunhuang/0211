@@ -29,6 +29,9 @@ class Settings:
     auto_push: bool = field(default_factory=lambda: _bool(os.getenv("AUTO_PUSH"), False))
     # true：每晚自動讀程式碼分析每個新問題（較耗 AI 額度）；false：只在管理者要求時分析
     auto_analyze: bool = field(default_factory=lambda: _bool(os.getenv("AUTO_ANALYZE"), False))
+    # false（預設，手動模式）：David 不讀程式碼——不分析、不自動配對 commit；問題由你和夥伴處理後手動標記完成
+    # true：開啟讀程式碼的功能（分析按鈕、/analyze、每早自動配對 commit）
+    code_analysis: bool = field(default_factory=lambda: _bool(os.getenv("CODE_ANALYSIS"), False))
     # ---- 資料庫與檔案 ----
     # firestore（Firebase 正式環境）或 sqlite（本機／一般主機）
     db_backend: str = field(default_factory=lambda: os.getenv("DB_BACKEND", "sqlite").strip().lower())

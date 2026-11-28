@@ -79,6 +79,11 @@ class Bot:
         return msg
 
     def job_sync(self, notify: bool = True) -> str:
+        if not self.s.code_analysis:
+            msg = "目前是手動模式：David 不讀程式碼，也不自動配對 commit。處理好的問題請用 /resolve 編號 標記完成。"
+            if notify:
+                self.notify_admins(msg)
+            return msg
         try:
             msg = pipeline.sync_commits(self.db, self.llm, self.s, now=self.now(), systems=self.systems).admin_summary
         except Exception as e:  # noqa: BLE001
@@ -103,7 +108,7 @@ class Bot:
         _spawn(self._run_long, job, None, None)
 
     def job_announce(self) -> str:
-        sync_msg = self.job_sync(notify=False)
+        sync_msg = self.job_sync(notify=False) if self.s.code_analysis else ""
         try:
             res = pipeline.prepare_announcements(self.db, self.llm, self.s, self.now(), systems=self.systems)
             msg = (sync_msg + "\n\n" if sync_msg else "") + res.admin_summary
@@ -244,6 +249,10 @@ class Bot:
         ctx = commands.Ctx(db=self.db, line=self.line, now=self.now, group_id=group_id, systems=self.systems,
                            run_digest=self.job_digest, run_announce=self.job_announce, run_sync=self.job_sync,
                            run_analyze=self.job_analyze)
+        if cmd in ("/analyze", "/sync") and not self.s.code_analysis:
+            self.line.reply(reply_token, "目前是手動模式：David 不讀程式碼分析、也不自動配對 commit。\n"
+                                         "問題請到後台整理；處理好後用 /resolve 編號 怎麼改的 | 在哪裡 標記完成。")
+            return
         if cmd == "/analyze":
             iid = int(text.split()[1].lstrip("#")) if len(text.split()) > 1 and text.split()[1].lstrip("#").isdigit() else 0
             err = pipeline.request_analysis(self.db, iid, self.now()) if iid else "格式：/analyze 問題編號"

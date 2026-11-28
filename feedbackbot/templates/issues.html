@@ -22,14 +22,14 @@
 </form>
 <div class="card scroll">
   {% if rows %}<table>
-    <tr><th>#</th><th>系統</th><th>問題</th><th>類型</th><th>優先級</th><th>狀態</th><th>反映的中心</th><th class="n">回饋數</th><th>最近回報</th></tr>
+    <tr><th>#</th><th>系統</th><th>問題</th><th>類型</th><th>優先級</th><th>狀態</th><th>反映的單位</th><th>負責人</th><th class="n">回饋數</th><th>最近回報</th></tr>
     {% for i in rows %}
     <tr><td>{{ i.id }}</td><td class="nowrap sub">{{ sysname(i.system_id) }}</td><td class="title-col"><a href="/admin/issues/{{ i.id }}">{{ i.title }}</a>{% if i.module %}<div class="sub">{{ i.module }}</div>{% endif %}</td>
       <td style="white-space:nowrap">{{ KIND_ZH.get(i.kind, i.kind) }}</td>
       <td><span class="pill {{ i.priority }}">{{ i.priority or '-' }}</span></td>
       <td><span class="pill {{ i.status }}">{{ STATUS_ZH.get(i.status) }}</span></td>
       <td class="title-col">{% if i.n_groups >= 2 %}<span class="pill common">共同 {{ i.n_groups }} 家</span> {% endif %}<span class="sub">{{ i.groups | join('、') }}</span></td>
-      <td class="n">{{ i.n_feedback }}</td><td class="sub">{{ i.last_date or '' }}</td></tr>
+      <td class="nowrap">{{ i.assignee or '' }}</td><td class="n">{{ i.n_feedback }}</td><td class="sub">{{ i.last_date or '' }}</td></tr>
     {% endfor %}
   </table>{% else %}<div class="empty">沒有符合的問題。</div>{% endif %}
 </div>

@@ -1,5 +1,12 @@
 {% extends "base.html" %}
 {% block title %}#{{ i.id }} {{ i.title }}｜回饋後台{% endblock %}
+{% macro fb(f) %}<div class="quote" style="margin-top:8px"><span class="sub">{{ (f.asked_at or f.digest_date)[:10] }}　{{ f.reporter or '' }}</span><div class="msg">{{ f.detail }}</div>
+  {% if i.status != 'merged' %}<form method="post" action="/admin/feedback/{{ f.id }}/move" style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">
+    <select name="target" aria-label="移到" style="font-size:12px;padding:2px 4px;max-width:260px">
+      <option value="new">拆成新的問題</option>
+      {% for o in others %}<option value="{{ o.id }}">移到 #{{ o.id }} {{ o.title[:24] }}</option>{% endfor %}
+    </select><button style="font-size:12px;padding:2px 8px">移動</button></form>{% endif %}
+</div>{% endmacro %}
 {% block body %}
 <p class="sub"><a href="/admin/issues">問題</a> ／ #{{ i.id }}</p>
 <h1>#{{ i.id }} {{ i.title }}</h1>
@@ -7,25 +14,44 @@
   <span class="pill {{ i.priority }}">{{ i.priority or '-' }}</span>
   <span class="pill common">{{ sysname(i.system_id) }}</span>
   <span class="pill">{{ KIND_ZH.get(i.kind, i.kind) }}</span>
-  {% if by_group | length >= 2 %}<span class="pill common">共同問題：{{ by_group | length }} 家中心</span>{% else %}<span class="pill">單一中心</span>{% endif %}
+  {% if by_group | length >= 2 %}<span class="pill common">共同問題：{{ by_group | length }} 個單位</span>{% else %}<span class="pill">單一單位</span>{% endif %}
+  {% if i.assignee %}<span class="pill in_progress">負責人：{{ i.assignee }}</span>{% endif %}
+  {% if i.status == 'merged' %}<span class="pill">已併入 <a href="/admin/issues/{{ i.merged_into }}">#{{ i.merged_into }}</a></span>{% endif %}
   <span class="sub">模組：{{ i.module or '-' }}　建立 {{ i.created_at | t }}</span></p>
 <div class="grid2">
   <div>
-    <div class="card"><strong>問題摘要</strong><div class="msg">{{ i.summary }}</div></div>
+    <div class="card"><strong>問題摘要</strong><div class="msg">{{ i.summary }}</div>
+      {% if i.status != 'merged' %}
+      <details style="margin-top:10px"><summary>✏️ 編輯問題（標題、說明、系統、類型、優先級、負責人）</summary>
+        <form method="post" action="/admin/issues/{{ i.id }}/edit" style="margin-top:8px;display:grid;gap:6px">
+          <label class="sub">標題<input type="text" name="title" value="{{ i.title }}" required style="width:100%"></label>
+          <label class="sub">說明<textarea name="summary">{{ i.summary }}</textarea></label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <label class="sub">系統<br><select name="system">{% for sid, sname in sys_options %}<option value="{{ sid }}" {{ 'selected' if i.system_id == sid }}>{{ sname }}</option>{% endfor %}</select></label>
+            <label class="sub">類型<br><select name="kind">{% for k, v in KIND_ZH.items() %}<option value="{{ k }}" {{ 'selected' if i.kind == k }}>{{ v }}</option>{% endfor %}</select></label>
+            <label class="sub">優先級<br><select name="priority"><option value="">-</option>{% for p in ('P0','P1','P2','P3') %}<option {{ 'selected' if i.priority == p }}>{{ p }}</option>{% endfor %}</select></label>
+            <label class="sub">負責人<br><input type="text" name="assignee" value="{{ i.assignee or '' }}" placeholder="例如：Becca"></label>
+            <label class="sub">功能／模組<br><input type="text" name="module" value="{{ i.module or '' }}"></label>
+          </div>
+          <p style="margin:0"><button class="primary">儲存</button> <span class="sub">P0＝影響營運需立即處理 … P3＝有空再做</span></p>
+        </form>
+      </details>
+      {% endif %}
+    </div>
 
-    <h2>各中心的回饋</h2>
+    <h2>各單位的回饋</h2>
     {% for gid, items in by_group.items() %}
     <div class="card" style="margin-bottom:10px">
       <strong><a href="/admin/groups/{{ gid }}">{{ label(gid) }}</a></strong> <span class="sub">{{ items | length }} 筆</span>
       {% set recent = items | reverse | list %}
-      {% for f in recent[:3] %}<div class="quote" style="margin-top:8px"><span class="sub">{{ f.digest_date }}　{{ f.reporter or '' }}</span><div class="msg">{{ f.detail }}</div></div>{% endfor %}
+      {% for f in recent[:3] %}{{ fb(f) }}{% endfor %}
       {% if recent | length > 3 %}<details style="margin-top:8px"><summary class="sub">顯示其餘 {{ recent | length - 3 }} 筆</summary>
-        {% for f in recent[3:] %}<div class="quote" style="margin-top:8px"><span class="sub">{{ f.digest_date }}　{{ f.reporter or '' }}</span><div class="msg">{{ f.detail }}</div></div>{% endfor %}
+        {% for f in recent[3:] %}{{ fb(f) }}{% endfor %}
       </details>{% endif %}
     </div>
     {% endfor %}
 
-    {% if i.status not in ('resolved', 'wontfix') %}
+    {% if code_analysis and i.status not in ('resolved', 'wontfix', 'merged') %}
     <div class="card" style="margin-top:16px">
       {% if i.analysis_requested %}
         <meta http-equiv="refresh" content="20">
@@ -55,14 +81,14 @@
     </div>
     {% endif %}
 
-    {% if i.status not in ('resolved', 'wontfix') %}
-    <h2>修改指示</h2>
+    {% if i.status not in ('resolved', 'wontfix', 'merged') %}
+    <h2>問題說明</h2>
     <div class="card">
-      <p class="sub" style="margin-top:0">複製下面這段，貼給 Claude Code（在該系統的程式碼資料夾執行 <code>claude</code>）或交給工程師。</p>
+      <p class="sub" style="margin-top:0">複製下面這段，可以貼給 Claude（討論或修改程式）或傳給夥伴。</p>
       <textarea id="fixprompt" readonly style="min-height:220px;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace">{{ fix_prompt }}</textarea>
       <p><button class="primary" type="button" onclick="(function(b){var t=document.getElementById('fixprompt');
         (navigator.clipboard ? navigator.clipboard.writeText(t.value) : Promise.reject()).then(function(){b.textContent='已複製 ✓'},
-        function(){t.select();document.execCommand('copy');b.textContent='已複製 ✓'});})(this)">複製修改指示</button></p>
+        function(){t.select();document.execCommand('copy');b.textContent='已複製 ✓'});})(this)">複製問題說明</button></p>
     </div>
     {% endif %}
 
@@ -82,6 +108,8 @@
         {% if commits %}<p class="sub">commit：{{ commits | join(', ') }}（{{ '自動配對' if i.auto_resolved else '手動' }}）</p>{% endif %}
         <p class="sub">{{ i.resolved_at | t }}</p>
         <form method="post" action="/admin/issues/{{ i.id }}/status"><input type="hidden" name="action" value="reopen"><button>改回未完成</button></form>
+      {% elif i.status == 'merged' %}
+        <p>這個問題的回饋已經併入 <a href="/admin/issues/{{ i.merged_into }}">#{{ i.merged_into }}</a>，請到那裡處理。</p>
       {% else %}
         <form method="post" action="/admin/issues/{{ i.id }}/resolve" style="margin-top:8px">
           <label class="sub" for="note">怎麼改的（會出現在公告）</label>
@@ -91,12 +119,33 @@
           <p><button class="primary">標記完成</button></p>
         </form>
         <form method="post" action="/admin/issues/{{ i.id }}/status" style="display:flex;gap:6px;flex-wrap:wrap">
-          {% if i.status != 'in_progress' %}<button name="action" value="start">標記修改中</button>{% endif %}
+          {% if i.status != 'in_progress' %}<button name="action" value="start">標記處理中</button>{% endif %}
           <input type="text" name="note" placeholder="不處理的原因" aria-label="不處理的原因">
           <button name="action" value="wontfix">不處理</button>
         </form>
       {% endif %}
     </div>
+    <div class="card" style="margin-top:12px" id="notes">
+      <strong>協作備註</strong>
+      {% for n in notes %}<div class="quote" style="margin-top:8px"><span class="sub">{{ n.author }}　{{ n.at | t }}</span><div class="msg">{{ n.text }}</div></div>
+      {% else %}<div class="empty">還沒有備註。可以記錄討論結果、誰在處理、卡在哪裡。</div>{% endfor %}
+      <form method="post" action="/admin/issues/{{ i.id }}/note" style="margin-top:8px">
+        <input type="text" name="author" value="{{ author }}" placeholder="你的名字" aria-label="署名" style="width:100%;margin-bottom:6px">
+        <textarea name="text" placeholder="寫下備註…" required></textarea>
+        <p style="margin:6px 0 0"><button>新增備註</button></p>
+      </form>
+    </div>
+    {% if i.status != 'merged' %}
+    <div class="card" style="margin-top:12px">
+      <strong>合併重複的問題</strong>
+      <form method="post" action="/admin/issues/{{ i.id }}/merge" style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap"
+            onsubmit="return confirm('把這個問題的所有回饋併到選擇的問題，這個問題會標記為「已合併」。確定？')">
+        <select name="target" aria-label="合併到" style="max-width:100%">{% for o in others %}<option value="{{ o.id }}">併到 #{{ o.id }} {{ o.title[:24] }}</option>{% endfor %}</select>
+        <input type="hidden" name="author" value="{{ author }}">
+        <button>合併</button>
+      </form>
+    </div>
+    {% endif %}
     <div class="card" style="margin-top:12px">
       <strong>所屬系統</strong>
       <form method="post" action="/admin/issues/{{ i.id }}/system" style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
@@ -105,7 +154,7 @@
         </select>
         <button>改系統</button>
       </form>
-      <p class="sub" style="margin:6px 0 0">AI 判斷錯時可改。改了之後，按上方「分析這個問題」用新系統的程式碼重新分析。</p>
+      <p class="sub" style="margin:6px 0 0">AI 判斷錯時可改（也可以在「編輯問題」裡改）。</p>
     </div>
     <div class="card" style="margin-top:12px">
       <strong>公告紀錄</strong>

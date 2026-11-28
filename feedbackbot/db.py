@@ -19,7 +19,7 @@ from typing import Any
 
 from .store import DocStore, SqliteStore
 
-CLOSED = ("resolved", "wontfix")
+CLOSED = ("resolved", "wontfix", "merged")
 
 
 class DB:
@@ -202,7 +202,22 @@ class DB:
         self.s.update("issues", int(issue_id), fields)
 
     def issues_resolved_since(self, since_iso: str) -> list[dict]:
-        return [i for i in self.all_issues() if i["status"] in CLOSED and (i.get("resolved_at") or "") > since_iso]
+        return [i for i in self.all_issues()
+                if i["status"] in ("resolved", "wontfix") and (i.get("resolved_at") or "") > since_iso]
+
+    # ---------------- 手動整理（協作）----------------
+    def add_issue_note(self, issue_id: int, author: str, text: str, now: datetime) -> None:
+        i = self.issue(issue_id)
+        notes = json.loads(i.get("notes") or "[]")
+        notes.append({"at": now.isoformat(), "author": author, "text": text})
+        self.update_issue(issue_id, now, notes=json.dumps(notes, ensure_ascii=False))
+
+    def move_feedback(self, feedback_id: int, issue_id: int) -> None:
+        f = self.s.get("feedback", feedback_id)
+        target = self.issue(issue_id)
+        if not f or not target:
+            raise KeyError("回饋或問題不存在")
+        self.s.update("feedback", feedback_id, {"issue_id": int(issue_id), "system_id": target.get("system_id")})
 
     def issue_groups(self, issue_id: int) -> list[str]:
         return sorted({f["group_id"] for f in self.issue_feedback(issue_id)})
@@ -217,10 +232,11 @@ class DB:
     # ================================================================ feedback
     def add_feedback(self, *, group_id: str, message_ids: list[int], reporter: str | None, kind: str,
                      title: str, detail: str, severity: str | None, digest_date: str, now: datetime,
-                     system_id: str = "unknown") -> int:
+                     system_id: str = "unknown", asked_at: str | None = None) -> int:
         fid = self.s.next_id("feedback")
         self.s.set("feedback", fid, {
-            "id": fid, "group_id": group_id, "issue_id": None, "system_id": system_id, "message_ids": json.dumps(message_ids),
+            "id": fid, "group_id": group_id, "issue_id": None, "system_id": system_id,
+            "asked_at": asked_at or now.isoformat(), "message_ids": json.dumps(message_ids),
             "reporter": reporter, "kind": kind, "title": title, "detail": detail, "severity": severity,
             "digest_date": digest_date, "created_at": now.isoformat(),
         })
