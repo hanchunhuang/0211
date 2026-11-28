@@ -111,6 +111,8 @@
       {% elif i.status == 'merged' %}
         <p>這個問題的回饋已經併入 <a href="/admin/issues/{{ i.merged_into }}">#{{ i.merged_into }}</a>，請到那裡處理。</p>
       {% else %}
+        <p style="margin:8px 0"><a class="primary" href="/admin/fixes/new?issues={{ i.id }}">📄 貼上修改回報（md）</a>
+          <span class="sub">或直接在下面填寫：</span></p>
         <form method="post" action="/admin/issues/{{ i.id }}/resolve" style="margin-top:8px">
           <label class="sub" for="note">怎麼改的（會出現在公告）</label>
           <textarea id="note" name="note" required></textarea>

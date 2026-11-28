@@ -104,6 +104,9 @@ class FakeLLM:
             Evaluation(issue_id=r["issue_id"], addresses_feedback="yes", comment="ok") for r in resolved],
             follow_ups=[])
 
+    def summarize_system(self, system_name, changes_md, open_issues):
+        return f"### {system_name} 現況\n- 修改回報 {changes_md.count('## #')} 份"
+
     def announcement(self, company, items):
         return f"{company} 您好：" + "；".join(f"{i['problem']} 已修正（{i['where']}）" for i in items)
 
@@ -675,3 +678,68 @@ def test_issue_status_filter(env):
     only_open = client.get("/admin/issues?status=status_open").text
     assert "匯出缺出貨日期" in all_open and "低庫存提醒" in all_open
     assert "低庫存提醒" in only_open and "匯出缺出貨日期" not in only_open
+
+
+def test_fix_report_flow(env, monkeypatch):
+    """處理完問題 → 貼上修改回報 md → 問題標記完成、記入系統修改紀錄 → 可下載紀錄、整理現況摘要。"""
+    import feedbackbot.app as appmod
+    from feedbackbot import fixreport
+    bot, line, client = env
+    monkeypatch.setattr(appmod, "_spawn", lambda fn, *args: fn(*args))
+    bot.s.code_analysis = False
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"), text_ev(GA, "U3", "可以加庫存提醒嗎"))
+    pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
+    export, stock = issue_by_title(bot, "匯出缺出貨日期"), issue_by_title(bot, "低庫存提醒")
+    sid = export["system_id"]
+    assert fixreport.HEADER in pipeline.fix_prompt(bot.db, bot.systems, export["id"])   # 問題說明附上回報格式
+
+    bot.s.admin_web_password = "pw"
+    origin = {"origin": "http://testserver"}
+    client.post("/admin/login", data={"password": "pw"}, headers=origin)
+    page = client.get(f"/admin/fixes/new?issues={export['id']}").text
+    assert f"## #{export['id']}" in page
+
+    bad = "# 修改回報\n- 問題：#999\n"
+    assert "找不到問題 #999" in client.post("/admin/fixes/check", data={"md": bad}, headers=origin).text
+    md = f"""# 修改回報
+- 系統：{sid}
+- 問題：#{export['id']}
+- 日期：2026-11-28
+- 修改者：Eva
+- commit：abc1234
+
+## #{export['id']} 匯出缺出貨日期
+- 怎麼改的：匯出 Excel 新增「出貨日期」欄位
+- 在哪裡：訂單管理 → 匯出 Excel
+
+## 技術說明
+- 修改檔案：app/Exports/OrderExport.php
+"""
+    r = client.post("/admin/fixes/check", data={"md": md}, headers=origin)
+    assert "確認套用" in r.text and "匯出 Excel 新增「出貨日期」欄位" in r.text
+    r = client.post("/admin/fixes/apply", data={"md": md}, headers=origin, follow_redirects=False)
+    assert r.status_code == 303 and f"/admin/systems/{sid}" in r.headers["location"]
+    e = bot.db.issue(export["id"])
+    assert e["status"] == "resolved" and e["resolution_location"] == "訂單管理 → 匯出 Excel"
+    ch = bot.db.changes(sid)
+    assert len(ch) == 1 and "OrderExport.php" in ch[0]["md"] and ch[0]["author"] == "Eva"
+
+    # LINE 直接貼修改回報
+    md2 = f"# 修改回報\n- 問題：#{stock['id']}\n\n## 怎麼改的\n新增低庫存提醒\n\n## 在哪裡\n- 庫存 → 提醒設定\n"
+    post(client, text_ev(None, ADMIN, md2))
+    assert "已套用修改回報" in line.replies[-1] and bot.db.issue(stock["id"])["status"] == "resolved"
+    # 手動 /resolve 也會記入紀錄
+    post(client, text_ev(GA, "U1", "排班頁很慢"))
+    bot.db.create_issue("排班頁很慢", "bug", "慢", None, datetime(2026, 11, 28, tzinfo=TZ), system_id=sid)
+    slow = issue_by_title(bot, "排班頁很慢")
+    post(client, text_ev(None, ADMIN, f"/resolve {slow['id']} 加快排班頁 | 人員排班"))
+    assert len(bot.db.changes(sid)) == 3
+
+    r = client.get(f"/admin/systems/{sid}")
+    assert "OrderExport.php" in r.text and "新增低庫存提醒" in r.text
+    log_md = client.get(f"/admin/systems/{sid}/changelog.md").text
+    assert "修改紀錄" in log_md and "匯出 Excel 新增「出貨日期」欄位" in log_md
+    client.post(f"/admin/systems/{sid}/summary", headers=origin)
+    assert "現況" in bot.db.get_kv(f"system_summary:{sid}")
+    assert "系統現況摘要" in client.get(f"/admin/systems/{sid}/changelog.md").text
+    assert "系統" in client.get("/admin/systems").text

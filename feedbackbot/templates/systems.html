@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}系統｜回饋後台{% endblock %}
+{% block body %}
+<h1>系統</h1>
+<p class="sub">每個系統的修改紀錄與現況。處理完問題後到 <a href="/admin/fixes/new">回報修改</a> 貼上修改回報，就會記在這裡。</p>
+<div class="card scroll"><table>
+  <tr><th>系統</th><th class="n">未完成問題</th><th class="n">修改紀錄</th><th>最近修改</th></tr>
+  {% for x in rows %}<tr><td class="nowrap"><a href="/admin/systems/{{ x.id }}">{{ x.name }}</a></td><td class="n">{{ x.open }}</td>
+    <td class="n">{{ x.changes }}</td><td class="sub">{{ x.last }}</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

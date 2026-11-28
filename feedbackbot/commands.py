@@ -157,6 +157,8 @@ def handle(ctx: Ctx, text: str) -> str:
         note, _, where = m.group(2).partition("|")
         if not resolve_issue(db, int(m.group(1)), note.strip(), where.strip(), ctx.now()):
             return "找不到這個問題編號"
+        from .pipeline import record_resolution
+        record_resolution(db, int(m.group(1)), ctx.now(), "LINE")
         tip = "" if where.strip() else "\n（建議加上「| 在哪裡」，公告時使用者才知道去哪看）"
         return f"✅ #{m.group(1)} 已標記完成，會在下次公告時通知相關群組。{tip}"
 

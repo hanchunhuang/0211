@@ -8,6 +8,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import logging
+import re
 import hmac
 import json
 import secrets
@@ -22,10 +24,11 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import pipeline
+from . import fixreport, pipeline
 from .db import CLOSED
 from .pipeline import KIND_ZH, STATUS_ZH
 
+log = logging.getLogger(__name__)
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 TEMPLATES.env.globals.update(KIND_ZH=KIND_ZH, STATUS_ZH=STATUS_ZH)
 PAGE_SIZE = 100
@@ -326,6 +329,84 @@ def build_router(get_bot: Callable) -> APIRouter:
         bot.db.move_feedback(fid, int(target))
         return back(f"/admin/issues/{int(target)}")
 
+    # ------------------------------------------------------------ 修改回報（貼上 md）
+    @r.get("/fixes/new", response_class=HTMLResponse)
+    def fix_new(request: Request, issues: str = ""):
+        bot = get_bot()
+        picked = [bot.db.issue(int(x)) for x in re.findall(r"\d+", issues)]
+        picked = [i for i in picked if i]
+        sid = picked[0].get("system_id") if picked else ""
+        tpl = fixreport.template(picked, sid or "系統代號", bot.systems.name(sid) if sid else "系統名稱",
+                                 bot.now().strftime("%Y-%m-%d"))
+        return render(request, "fix_new.html", md=tpl if picked else "", blank=tpl, check=None)
+
+    @r.post("/fixes/check", response_class=HTMLResponse)
+    def fix_check(request: Request, md: str = Form(...)):
+        bot = get_bot()
+        return render(request, "fix_new.html", md=md, blank="", check=pipeline.check_fix_report(bot.db, bot.systems, md))
+
+    @r.post("/fixes/apply")
+    def fix_apply(request: Request, md: str = Form(...), author: str = Form("")):
+        bot = get_bot()
+        res = pipeline.apply_fix_report(bot.db, bot.systems, md, bot.now(),
+                                        author or unquote(request.cookies.get("fbot_author", "")))
+        if not res.ok:
+            raise HTTPException(400, "；".join(res.errors))
+        return back(f"/admin/systems/{res.system_id}?applied={res.change_id}")
+
+    # ------------------------------------------------------------ 系統（修改紀錄、現況摘要）
+    @r.get("/systems", response_class=HTMLResponse)
+    def systems_list(request: Request):
+        bot = get_bot()
+        data = Snapshot(bot.db)
+        rows = []
+        for sid, name in bot.systems.options():
+            ch = bot.db.changes(sid)
+            rows.append({"id": sid, "name": name, "changes": len(ch), "last": ch[0]["date"] if ch else "",
+                         "open": sum(1 for i in data.issues if (i.get("system_id") or "unknown") == sid
+                                     and i["status"] not in CLOSED)})
+        return render(request, "systems.html", rows=rows)
+
+    @r.get("/systems/{sid}", response_class=HTMLResponse)
+    def system_detail(request: Request, sid: str, applied: int = 0):
+        bot = get_bot()
+        if not bot.systems.valid(sid):
+            raise HTTPException(404)
+        db = bot.db
+        open_issues = [i for i in db.open_issues() if (i.get("system_id") or "unknown") == sid]
+        return render(request, "system.html", sid=sid, name=bot.systems.name(sid), changes=db.changes(sid),
+                      open_issues=open_issues, applied=applied, summary=db.get_kv(f"system_summary:{sid}") or "",
+                      summary_at=db.get_kv(f"system_summary_at:{sid}") or "",
+                      pending=db.get_kv(f"system_summary_pending:{sid}") == "1")
+
+    @r.get("/systems/{sid}/changelog.md")
+    def system_changelog(sid: str):
+        bot = get_bot()
+        if not bot.systems.valid(sid):
+            raise HTTPException(404)
+        md = pipeline.system_changelog_md(bot.db, bot.systems, sid)
+        return Response(md, media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{sid}-changelog.md"'})
+
+    @r.post("/systems/{sid}/summary")
+    def system_summary(sid: str):
+        bot = get_bot()
+        if not bot.systems.valid(sid):
+            raise HTTPException(404)
+        bot.db.set_kv(f"system_summary_pending:{sid}", "1")
+
+        def job():
+            try:
+                pipeline.system_summary(bot.db, bot.llm, bot.systems, sid, bot.now())
+            except Exception:  # noqa: BLE001
+                log.exception("系統現況摘要失敗")
+            finally:
+                bot.db.set_kv(f"system_summary_pending:{sid}", "0")
+
+        from .app import _spawn
+        _spawn(job)
+        return back(f"/admin/systems/{sid}")
+
     # ------------------------------------------------------------ 單位報表（每天／每月）
     @r.get("/unit-report", response_class=HTMLResponse)
     def unit_report(request: Request, period: str = "month", date: str = "", group: str = ""):
@@ -373,9 +454,10 @@ def build_router(get_bot: Callable) -> APIRouter:
         return back(f"/admin/issues/{iid}")
 
     @r.post("/issues/{iid}/resolve")
-    def issue_resolve(iid: int, note: str = Form(...), location: str = Form("")):
+    def issue_resolve(request: Request, iid: int, note: str = Form(...), location: str = Form("")):
         bot = get_bot()
         pipeline.resolve_issue(bot.db, iid, note.strip(), location.strip(), bot.now())
+        pipeline.record_resolution(bot.db, iid, bot.now(), unquote(request.cookies.get("fbot_author", "")))
         return back(f"/admin/issues/{iid}")
 
     @r.post("/issues/{iid}/status")

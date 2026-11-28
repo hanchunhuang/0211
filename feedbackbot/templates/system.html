@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ name }}｜回饋後台{% endblock %}
+{% block body %}
+<p class="sub"><a href="/admin/systems">系統</a> ／ {{ sid }}</p>
+<h1>{{ name }}</h1>
+{% if applied %}<div class="card" style="margin-bottom:12px;border-color:var(--good)">✅ 修改回報已套用，問題已標記完成並記入下方的修改紀錄。</div>{% endif %}
+<p><a href="/admin/fixes/new">＋ 回報修改</a>　<a href="/admin/systems/{{ sid }}/changelog.md">⬇ 下載完整修改紀錄（.md）</a>
+  　<a href="/admin/issues?system={{ sid }}">這個系統的問題</a></p>
+
+<div class="grid2">
+  <div>
+    <h2>系統現況摘要</h2>
+    <div class="card">
+      {% if pending %}<meta http-equiv="refresh" content="15"><strong>⏳ 整理中…</strong> <span class="sub">約 1 分鐘，這頁會自動重新整理。</span>
+      {% elif summary %}<pre class="report">{{ summary }}</pre><p class="sub">更新於 {{ summary_at | t }}</p>
+      {% else %}<div class="empty">還沒有摘要。累積幾份修改回報後，按下方按鈕請 David 整理「這個系統目前被調整成什麼樣子」。</div>{% endif %}
+      {% if not pending %}<form method="post" action="/admin/systems/{{ sid }}/summary" style="margin-top:8px">
+        <button>{{ '重新整理摘要' if summary else '整理系統現況摘要' }}</button> <span class="sub">會使用 AI 額度</span></form>{% endif %}
+    </div>
+
+    <h2>修改紀錄（{{ changes | length }}）</h2>
+    {% for c in changes %}
+    <details class="card" style="margin-bottom:10px" {{ 'open' if c.id == applied }}>
+      <summary><strong>{{ c.date }}</strong>　{{ c.title }} <span class="sub">｜{{ c.author or '-' }}</span></summary>
+      <p class="sub">問題：{% for x in c.issue_ids %}<a href="/admin/issues/{{ x }}">#{{ x }}</a> {% endfor %}
+        {% if c.commits %}｜commit：{{ c.commits | join(', ') }}{% endif %}</p>
+      <pre class="report">{{ c.md }}</pre>
+    </details>
+    {% else %}<div class="card empty">還沒有修改紀錄。</div>{% endfor %}
+  </div>
+  <div>
+    <h2>未完成問題（{{ open_issues | length }}）</h2>
+    <div class="card">
+      {% for i in open_issues %}<div style="margin-bottom:6px"><a href="/admin/issues/{{ i.id }}">#{{ i.id }} {{ i.title }}</a>
+        <span class="pill {{ i.status }}">{{ STATUS_ZH.get(i.status) }}</span>{% if i.assignee %} <span class="sub">{{ i.assignee }}</span>{% endif %}</div>
+      {% else %}<div class="empty">沒有未完成的問題 🎉</div>{% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

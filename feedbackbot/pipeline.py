@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from .config import Settings
 from .db import DB
 from .llm import LLM
 from .repo import CodeRepo
+from . import fixreport
 from .systems import UNKNOWN, Systems
 
 log = logging.getLogger(__name__)
@@ -437,8 +439,25 @@ def fix_prompt(db: DB, systems: Systems, issue_id: int) -> str:
         "3. 修改後執行相關測試，並說明我要怎麼手動驗證。",
         f"4. commit 訊息用：{kind}: <中文說明> (#{i['id']})",
         "5. 改完先讓我確認，不要自行 push。",
+        "6. 完成後，請用下面的格式給我一份「修改回報」Markdown（我會貼回回饋系統）：",
+        "",
+        "```markdown",
+        fixreport.template([i], sid or UNKNOWN, systems.name(sid), datetime.now().strftime("%Y-%m-%d")),
+        "```",
     ]
     return "\n".join(lines)
+
+
+def system_summary(db: DB, llm: LLM, systems: Systems, system_id: str, now: datetime) -> str:
+    """用 AI 整理「這個系統目前被調整成什麼樣子」（只在管理者按下時執行）。"""
+    changes = db.changes(system_id)[:80]
+    md = "\n\n".join(f"### {c['date']} {c['title']}\n{c['md']}" for c in reversed(changes))
+    open_issues = [{"id": i["id"], "title": i["title"], "summary": i["summary"]}
+                   for i in db.open_issues() if (i.get("system_id") or UNKNOWN) == system_id][:50]
+    text = llm.summarize_system(systems.name(system_id), md or "（還沒有修改回報）", open_issues)
+    db.set_kv(f"system_summary:{system_id}", text)
+    db.set_kv(f"system_summary_at:{system_id}", now.isoformat())
+    return text
 
 
 def merge_issues(db: DB, source_id: int, target_id: int, now: datetime, author: str = "") -> str:
@@ -455,6 +474,107 @@ def merge_issues(db: DB, source_id: int, target_id: int, now: datetime, author: 
     db.update_issue(source_id, now, status="merged", merged_into=int(target_id))
     db.add_issue_note(target_id, author or "系統", f"合併了 #{source_id}「{src['title']}」的回饋", now)
     return ""
+
+
+@dataclass
+class FixApply:
+    ok: bool
+    system_id: str = ""
+    issues: list[dict] = field(default_factory=list)      # [{"id", "title", "how", "where", "status"}]
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    change_id: int | None = None
+
+
+def _match_system(systems: Systems, text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    first = re.split(r"[（(\s]", t, maxsplit=1)[0]
+    if systems.valid(first):
+        return first
+    for sid, name in systems.options():
+        if name in t or t in name:
+            return sid
+    return ""
+
+
+def check_fix_report(db: DB, systems: Systems, md: str) -> FixApply:
+    """解析並檢查修改回報（不寫入）。"""
+    from . import fixreport
+    rep = fixreport.parse(md)
+    res = FixApply(ok=False, errors=list(rep.errors))
+    sid = _match_system(systems, rep.system)
+    if rep.system and not sid:
+        res.errors.append(f"看不懂系統「{rep.system}」，請填系統代號（例如 {', '.join(systems.ids()[:3])}）")
+    for iid in rep.issue_ids:
+        i = db.issue(iid)
+        if not i:
+            res.errors.append(f"找不到問題 #{iid}")
+            continue
+        if i["status"] == "merged":
+            res.errors.append(f"#{iid} 已經併入 #{i.get('merged_into')}，請改回報 #{i.get('merged_into')}")
+            continue
+        if i["status"] in ("resolved", "wontfix"):
+            res.warnings.append(f"#{iid} 原本已經是「{STATUS_ZH.get(i['status'])}」，會用這份回報更新說明")
+        if sid and i.get("system_id") not in (sid, None) and i.get("system_id") != UNKNOWN:
+            res.warnings.append(f"#{iid} 原本歸在「{systems.name(i.get('system_id'))}」，會改成「{systems.name(sid)}」")
+        if not rep.where_for(iid):
+            res.warnings.append(f"#{iid} 沒有寫「在哪裡」，公告裡就不會說明位置")
+        res.issues.append({"id": iid, "title": i["title"], "how": rep.how_for(iid), "where": rep.where_for(iid),
+                           "status": STATUS_ZH.get(i["status"], i["status"])})
+    if not sid and res.issues:
+        sids = {db.issue(x["id"]).get("system_id") for x in res.issues}
+        sid = sids.pop() if len(sids) == 1 else ""
+        if not sid:
+            res.errors.append("這些問題屬於不同系統，請在「- 系統：」寫明是哪個系統")
+    res.system_id = sid
+    res.ok = not res.errors
+    res.parsed = rep  # type: ignore[attr-defined]
+    return res
+
+
+def apply_fix_report(db: DB, systems: Systems, md: str, now: datetime, author: str = "") -> FixApply:
+    """套用修改回報：把問題標記完成，並記入該系統的修改紀錄。"""
+    res = check_fix_report(db, systems, md)
+    if not res.ok:
+        return res
+    rep = res.parsed  # type: ignore[attr-defined]
+    for x in res.issues:
+        if (db.issue(x["id"]).get("system_id") or UNKNOWN) != res.system_id:
+            db.update_issue(x["id"], now, system_id=res.system_id)
+        resolve_issue(db, x["id"], x["how"], x["where"], now, commits=rep.commits)
+    title = "、".join(f"#{x['id']} {x['title']}" for x in res.issues)
+    res.change_id = db.add_change({
+        "system_id": res.system_id, "issue_ids": [x["id"] for x in res.issues], "title": title[:300],
+        "date": rep.date or now.strftime("%Y-%m-%d"), "author": rep.author or author, "commits": rep.commits,
+        "md": md.strip(),
+    }, now)
+    return res
+
+
+def record_resolution(db: DB, issue_id: int, now: datetime, author: str = "") -> None:
+    """手動標記完成（後台表單、/resolve）也記入系統修改紀錄。"""
+    i = db.issue(issue_id)
+    if not i or i["status"] != "resolved":
+        return
+    md = "\n".join([fixreport.HEADER, f"- 問題：#{i['id']}", f"- 日期：{now.strftime('%Y-%m-%d')}",
+                     f"- 修改者：{author}", "", f"## #{i['id']} {i['title']}",
+                     f"- 怎麼改的：{i.get('resolution_note') or ''}", f"- 在哪裡：{i.get('resolution_location') or ''}"])
+    db.add_change({"system_id": i.get("system_id") or UNKNOWN, "issue_ids": [i["id"]], "title": f"#{i['id']} {i['title']}",
+                   "date": now.strftime("%Y-%m-%d"), "author": author, "commits": [], "md": md}, now)
+
+
+def system_changelog_md(db: DB, systems: Systems, system_id: str) -> str:
+    """某個系統的完整修改紀錄（可下載，給之後的開發參考）。"""
+    lines = [f"# {systems.name(system_id)}：修改紀錄", ""]
+    summary = db.get_kv(f"system_summary:{system_id}")
+    if summary:
+        lines += ["## 系統現況摘要", "", summary, ""]
+    for c in db.changes(system_id):
+        body = re.sub(r"^#\s*修改回報\s*\n", "", c["md"]).replace("\n## ", "\n### ")
+        lines += [f"## {c['date']}　{c['title']}", f"（回報者：{c.get('author') or '-'}）", "", body, ""]
+    return "\n".join(lines)
 
 
 def split_feedback(db: DB, feedback_id: int, now: datetime) -> int:

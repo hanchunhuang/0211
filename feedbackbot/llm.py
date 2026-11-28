@@ -114,6 +114,7 @@ class LLM(Protocol):
                       repo=None, knowledge_file: str | None = None) -> CommitMatching: ...
     def evaluate(self, resolved: list[dict]) -> EvaluationReport: ...
     def announcement(self, company: str, items: list[dict]) -> str: ...
+    def summarize_system(self, system_name: str, changes_md: str, open_issues: list[dict]) -> str: ...
 
 
 SAFETY = (
@@ -299,6 +300,24 @@ class ClaudeLLM:
         )
         data = json.dumps(items, ensure_ascii=False, indent=1)
         return self._text(system, f"中心：{company}\n<data>\n{data}\n</data>", effort="low")
+
+    # -- 6. 系統現況摘要 --
+    def summarize_system(self, system_name: str, changes_md: str, open_issues: list[dict]) -> str:
+        data = json.dumps(open_issues, ensure_ascii=False, indent=1)
+        content = (f"系統：{system_name}\n<changes>\n{changes_md}\n</changes>\n"
+                   f"<open_issues>\n{data}\n</open_issues>")
+        return self._text(_summarize_system_prompt(), content, effort="low")
+
+
+def _summarize_system_prompt() -> str:
+    return (
+        "你是軟體產品的技術文件撰寫者。下面是某個系統一段時間以來的「修改回報」與目前未解決的問題。"
+        "請整理一份「系統現況摘要」，讓之後接手的工程師或 AI 快速了解這個系統目前被調整成什麼樣子：\n"
+        "1. 依功能模組分類，說明目前的行為（以最新的修改為準；後來的修改覆蓋前面的）\n"
+        "2. 重要的設計決定與注意事項\n"
+        "3. 目前還沒解決、已知的問題\n"
+        "用繁體中文、Markdown 條列，標題用 ###，不要編造回報裡沒有的內容。\n" + SAFETY
+    )
 
 
 def _image_block(raw: bytes, media_type: str) -> dict | None:

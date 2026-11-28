@@ -290,6 +290,16 @@ class DB:
         self.s.update("announcements", int(ann_id), {
             "status": status, "error": error, "sent_at": now.isoformat() if status == "sent" else None})
 
+    # ================================================================ changes（系統修改紀錄）
+    def add_change(self, record: dict, now: datetime) -> int:
+        cid = self.s.next_id("changes")
+        self.s.set("changes", cid, {"id": cid, "created_at": now.isoformat(), **record})
+        return cid
+
+    def changes(self, system_id: str | None = None) -> list[dict]:
+        where = [("system_id", "==", system_id)] if system_id else []
+        return sorted(self.s.find("changes", where), key=lambda c: c["id"], reverse=True)
+
     # ================================================================ reports
     def save_report(self, name: str, content: str, now: datetime) -> None:
         self.s.set("reports", name, {"name": name, "content": content, "created_at": now.isoformat()})

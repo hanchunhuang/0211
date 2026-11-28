@@ -19,7 +19,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
-from . import commands, pipeline
+from . import commands, fixreport, pipeline
 from .admin import LoginRequired, build_router, login_redirect_handler
 from .config import Settings
 from .db import DB
@@ -151,7 +151,18 @@ class Bot:
 
         # ---- 1 對 1 私訊：只處理管理者指令 ----
         if src.get("type") == "user":
-            if command and command.split()[0].lower() == "/whoami":
+            if is_admin and fixreport.is_report(text):
+                res = pipeline.apply_fix_report(self.db, self.systems, text, self.now(), "LINE")
+                if res.ok:
+                    msg = (f"✅ 已套用修改回報（{self.systems.name(res.system_id)}）\n"
+                           + "\n".join(f"#{x['id']} {x['title']}：{x['how'][:60]}" for x in res.issues)
+                           + "\n\n已記入系統修改紀錄。公告草稿明早產生，急的話私訊 /announce。")
+                    if res.warnings:
+                        msg += "\n\n提醒：" + "；".join(res.warnings)
+                else:
+                    msg = "⚠️ 修改回報還不能套用：\n" + "\n".join(f"• {e}" for e in res.errors)
+                self.line.reply(reply_token, msg)
+            elif command and command.split()[0].lower() == "/whoami":
                 self.line.reply(reply_token, f"你的 userId：{user_id}")
             elif is_admin and command:
                 self._run_command(command, reply_token, user_id, None)

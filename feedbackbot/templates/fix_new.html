@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}回報修改｜回饋後台{% endblock %}
+{% block body %}
+<h1>回報修改</h1>
+<p class="sub">處理完問題後，把「修改回報」Markdown 貼在下面（或選擇 .md 檔）。David 會把問題標記完成，並記入該系統的修改紀錄。</p>
+
+{% if check %}
+<div class="card" style="margin-bottom:16px">
+  {% if check.ok %}
+    <strong>✅ David 讀到的內容（確認無誤後按「確認套用」）</strong>
+    <p class="sub">系統：{{ sysname(check.system_id) }}</p>
+  {% else %}
+    <strong style="color:var(--bad)">⚠️ 還不能套用，請修正：</strong>
+    <ul>{% for e in check.errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if check.warnings %}<ul class="sub">{% for w in check.warnings %}<li>{{ w }}</li>{% endfor %}</ul>{% endif %}
+  {% if check.issues %}<div class="scroll"><table>
+    <tr><th>問題</th><th>怎麼改的（會出現在公告）</th><th>在哪裡</th><th>目前狀態</th></tr>
+    {% for x in check.issues %}<tr><td class="title-col"><a href="/admin/issues/{{ x.id }}">#{{ x.id }} {{ x.title }}</a></td>
+      <td class="msg">{{ x.how }}</td><td class="sub">{{ x.where }}</td><td class="nowrap">{{ x.status }}</td></tr>{% endfor %}
+  </table></div>{% endif %}
+  {% if check.ok %}
+  <form method="post" action="/admin/fixes/apply" style="margin-top:10px">
+    <input type="hidden" name="md" value="{{ md }}">
+    <button class="primary">確認套用</button> <span class="sub">問題會標記為「已完成」，明早 David 會產生公告草稿（急的話私訊 /announce）</span>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+<form method="post" action="/admin/fixes/check" class="card">
+  <p style="margin-top:0"><label>選擇 .md 檔：<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain"
+     onchange="var f=this.files[0];if(!f)return;var r=new FileReader();r.onload=function(){document.getElementById('md').value=r.result};r.readAsText(f,'utf-8')"></label></p>
+  <textarea id="md" name="md" required style="min-height:360px;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace" placeholder="# 修改回報&#10;- 系統：…">{{ md }}</textarea>
+  <p style="margin-bottom:0"><button class="primary">檢查內容</button>
+    {% if blank and not md %}<button type="button" onclick="document.getElementById('md').value=document.getElementById('tpl').textContent">填入空白範本</button>{% endif %}</p>
+</form>
+{% if blank %}<pre id="tpl" hidden>{{ blank }}</pre>{% endif %}
+{% endblock %}
