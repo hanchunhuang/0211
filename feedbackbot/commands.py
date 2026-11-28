@@ -14,6 +14,7 @@ HELP = """🛠 管理指令
 /issues　列出未完成問題
 /issue 編號　看問題細節與修改建議
 /system 編號 系統代號　改正問題所屬的系統（/systems 看代號）
+/analyze 編號　讀程式碼分析怎麼改（會使用 AI 額度）
 /fix 編號　取得修改指示（可貼給 Claude Code）
 /start 編號　標記為修改中
 /resolve 編號 怎麼改的 | 在哪裡　手動標記完成
@@ -38,6 +39,7 @@ class Ctx:
     run_digest: Callable[[], str]          # 回傳給管理者的摘要
     run_announce: Callable[[], str]
     run_sync: Callable[[], str] = lambda: "（未啟用）"
+    run_analyze: Callable[[], str] = lambda: "（未啟用）"
     group_id: str | None = None            # 指令下在哪個群組（私訊為 None）
     systems: object = None                 # Systems（系統清單）
 
@@ -87,6 +89,12 @@ def handle(ctx: Ctx, text: str) -> str:
                 lines.append(f"{tag} #{i['id']} [{i['priority'] or '-'}] {i['title']}（{STATUS_ZH.get(i['status'])}，{n}個單位）")
         return "\n".join(lines)
 
+    if cmd == "/analyze":
+        from .pipeline import request_analysis
+        iid = _int(rest)
+        err = request_analysis(db, iid, ctx.now()) if iid else "格式：/analyze 問題編號"
+        return err or ctx.run_analyze()
+
     if cmd == "/fix":
         iid = _int(rest)
         if not iid or not db.issue(iid) or ctx.systems is None:
@@ -106,7 +114,7 @@ def handle(ctx: Ctx, text: str) -> str:
         from .pipeline import set_issue_system
         if not set_issue_system(db, int(m.group(1)), m.group(2), ctx.now()):
             return "找不到這個問題編號"
-        return f"#{m.group(1)} 已改為「{_sys_name(ctx, m.group(2))}」，下次整理（/today）時會用這個系統的程式碼重新分析。"
+        return f"#{m.group(1)} 已改為「{_sys_name(ctx, m.group(2))}」。要用新系統的程式碼重新分析，請私訊 /analyze {m.group(1)}"
 
     if cmd == "/issue":
         iid = _int(rest)

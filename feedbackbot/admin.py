@@ -266,6 +266,15 @@ def build_router(get_bot: Callable) -> APIRouter:
                       commits=json.loads(i.get("fix_commits") or "[]"), label=db.group_label,
                       fix_prompt=pipeline.fix_prompt(db, get_bot().systems, iid))
 
+    @r.post("/issues/{iid}/analyze")
+    def issue_analyze(iid: int):
+        bot = get_bot()
+        err = pipeline.request_analysis(bot.db, iid, bot.now())
+        if err:
+            raise HTTPException(400, err)
+        bot.start_job("analyze")
+        return back(f"/admin/issues/{iid}")
+
     @r.post("/issues/{iid}/system")
     def issue_system(iid: int, system: str = Form(...)):
         bot = get_bot()

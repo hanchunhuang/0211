@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> None:
     from .app import Bot
     bot = Bot()
     ctx = commands.Ctx(db=bot.db, line=bot.line, now=bot.now, run_digest=bot.job_digest,
-                       run_announce=bot.job_announce, run_sync=bot.job_sync)
+                       run_announce=bot.job_announce, run_sync=bot.job_sync, run_analyze=bot.job_analyze)
     if a.cmd == "digest":
         res = pipeline.digest(bot.db, bot.llm, bot.s, bot.now(), files=bot.files, systems=bot.systems)
         print(res.admin_summary, f"\n\n日報已存入後台：{res.report_name}")

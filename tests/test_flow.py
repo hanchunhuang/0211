@@ -132,6 +132,7 @@ def env(tmp_path, request):
     s.staff_user_ids = ["Ustaff"]
     s.systems_file = str(tmp_path / "no-systems.json")   # 預設單一系統；多系統另有測試
     s.repo_auto_update = False
+    s.auto_analyze = True   # 原本的測試假設自動分析；手動分析另有測試
     line = FakeLine()
     bot = Bot(settings=s, db=_make_db(request.param), line=line, llm=FakeLLM())
     client = TestClient(create_app(bot, start_scheduler=False))
@@ -571,3 +572,33 @@ def test_summary_only_group(env):
     # 切到不收集
     client.post(f"/admin/groups/{GA}/mode", data={"mode": "off"}, headers=origin)
     assert bot.db.is_excluded(GA)
+
+
+def test_manual_analysis(env, monkeypatch):
+    """預設不自動分析：每晚只歸納；管理者私訊 /analyze 或在後台按按鈕才讀程式碼分析。"""
+    import feedbackbot.app as appmod
+    bot, line, client = env
+    bot.s.auto_analyze = False
+    monkeypatch.setattr(appmod.threading, "Thread",
+                        lambda target, args, daemon: type("T", (), {"start": lambda self: target(*args)})())
+    post(client, text_ev(GA, "U1", "訂單匯出沒有出貨日期"), text_ev(GA, "U3", "希望有庫存提醒"))
+    res = pipeline.digest(bot.db, bot.llm, bot.s, datetime(2026, 11, 21, 23, 30, tzinfo=TZ))
+    assert bot.llm.analyzed == []
+    export, stock = issue_by_title(bot, "匯出缺出貨日期"), issue_by_title(bot, "低庫存提醒")
+    assert export["status"] == "open" and "/analyze" in bot.db.report(res.report_name)["content"]
+    # LINE：/analyze 編號
+    post(client, text_ev(None, ADMIN, f"/analyze {export['id']}"))
+    assert "開始分析" in line.replies[-1]
+    assert bot.db.issue(export["id"])["status"] == "analyzed" and len(bot.llm.analyzed) == 1
+    assert any("分析完成" in t for _, t in line.pushes)
+    assert bot.db.issue(stock["id"])["status"] == "open"            # 沒要求的不分析
+    # 後台按鈕
+    bot.s.admin_web_password = "pw"
+    origin = {"origin": "http://testserver"}
+    client.post("/admin/login", data={"password": "pw"}, headers=origin)
+    assert "分析這個問題" in client.get(f"/admin/issues/{stock['id']}").text
+    client.post(f"/admin/issues/{stock['id']}/analyze", headers=origin)
+    assert bot.db.issue(stock["id"])["status"] == "analyzed"
+    # 不存在的編號
+    post(client, text_ev(None, ADMIN, "/analyze 999"))
+    assert "找不到" in line.replies[-1]

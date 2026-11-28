@@ -27,6 +27,8 @@ class Settings:
     digest_at: str = field(default_factory=lambda: os.getenv("DAILY_DIGEST_AT", "23:30"))
     announce_at: str = field(default_factory=lambda: os.getenv("DAILY_ANNOUNCE_AT", "09:00"))
     auto_push: bool = field(default_factory=lambda: _bool(os.getenv("AUTO_PUSH"), False))
+    # true：每晚自動讀程式碼分析每個新問題（較耗 AI 額度）；false：只在管理者要求時分析
+    auto_analyze: bool = field(default_factory=lambda: _bool(os.getenv("AUTO_ANALYZE"), False))
     # ---- 資料庫與檔案 ----
     # firestore（Firebase 正式環境）或 sqlite（本機／一般主機）
     db_backend: str = field(default_factory=lambda: os.getenv("DB_BACKEND", "sqlite").strip().lower())

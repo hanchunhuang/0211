@@ -88,6 +88,20 @@ class Bot:
             self.notify_admins(msg)
         return msg
 
+    def job_analyze(self, notify: bool = True) -> str:
+        try:
+            msg = pipeline.analyze_requested(self.db, self.llm, self.s, self.now(), systems=self.systems)
+        except Exception as e:  # noqa: BLE001
+            log.exception("analyze failed")
+            msg = f"⚠️ 分析失敗：{e}"
+        if notify:
+            self.notify_admins(msg)
+        return msg
+
+    def start_job(self, job: str) -> None:
+        """在背景啟動長時間工作（Cloud Run 上會改呼叫自己的 /tasks/<job>）。"""
+        threading.Thread(target=self._run_long, args=(job, None, None), daemon=True).start()
+
     def job_announce(self) -> str:
         sync_msg = self.job_sync(notify=False)
         try:
@@ -228,7 +242,17 @@ class Bot:
     def _run_command(self, text: str, reply_token: str, user_id: str, group_id: str | None) -> None:
         cmd = text.split()[0].lower()
         ctx = commands.Ctx(db=self.db, line=self.line, now=self.now, group_id=group_id, systems=self.systems,
-                           run_digest=self.job_digest, run_announce=self.job_announce, run_sync=self.job_sync)
+                           run_digest=self.job_digest, run_announce=self.job_announce, run_sync=self.job_sync,
+                           run_analyze=self.job_analyze)
+        if cmd == "/analyze":
+            iid = int(text.split()[1].lstrip("#")) if len(text.split()) > 1 and text.split()[1].lstrip("#").isdigit() else 0
+            err = pipeline.request_analysis(self.db, iid, self.now()) if iid else "格式：/analyze 問題編號"
+            if err:
+                self.line.reply(reply_token, err)
+                return
+            self.line.reply(reply_token, f"⏳ 開始分析 #{iid}（會讀程式碼，約 1～3 分鐘），完成後私訊通知你…")
+            self.start_job("analyze")
+            return
         if cmd in LONG_JOBS:
             # 時間較長：先回覆，再執行，完成後推播給管理者
             self.line.reply(reply_token, "⏳ 處理中，完成後會私訊通知你…")
@@ -251,7 +275,11 @@ class Bot:
                 return  # 伺服器端仍在執行，完成後會自己通知
             except Exception:  # noqa: BLE001
                 log.exception("呼叫 /tasks/%s 失敗，改在背景執行", job)
-        commands.handle(ctx, text)
+        if text is None:
+            {"digest": self.job_digest, "sync": self.job_sync, "announce": self.job_announce,
+             "analyze": self.job_analyze}[job]()
+        else:
+            commands.handle(ctx, text)
 
     # ---------------- 排程 ----------------
     def start_scheduler(self) -> BackgroundScheduler:
@@ -289,6 +317,9 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
 
     @api.middleware("http")
     async def no_cache_admin(request: Request, call_next):
+        b = state.get("bot")
+        if b is not None and not b.self_url and request.url.hostname and request.url.hostname.endswith(".run.app"):
+            b.self_url = f"https://{request.url.hostname}"  # 記下自己的 Cloud Run 網址
         resp = await call_next(request)
         if request.url.path.startswith(("/admin", "/tasks")):
             # 不讓 Firebase Hosting／瀏覽器快取後台頁面
@@ -308,7 +339,7 @@ def create_app(bot: Bot | None = None, start_scheduler: bool = True) -> FastAPI:
         token = request.headers.get("x-task-token", "")
         if not b.s.task_token or not secrets.compare_digest(token.encode(), b.s.task_token.encode()):
             raise HTTPException(status_code=403, detail="forbidden")
-        jobs = {"digest": b.job_digest, "announce": b.job_announce, "sync": b.job_sync}
+        jobs = {"digest": b.job_digest, "announce": b.job_announce, "sync": b.job_sync, "analyze": b.job_analyze}
         if job not in jobs:
             raise HTTPException(status_code=404, detail="unknown job")
         return {"ok": True, "summary": jobs[job]()}

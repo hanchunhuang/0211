@@ -120,11 +120,15 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
         for sid, new_fb in by_system.items():
             touched |= _cluster_system(db, llm, sid, new_fb, now)
 
-        # ---- 3. 修改分析：今天有變動的問題，以及改過系統、等待重新分析的問題 ----
-        pending = {i["id"] for i in db.open_issues() if i["status"] == "open" and not i.get("analysis")}
-        targets = sorted(touched | pending)
-        updated: set[str] = set()
+        # ---- 3. 修改分析 ----
+        # 預設（AUTO_ANALYZE=false）：不自動讀程式碼，等管理者在後台按「分析」或私訊 /analyze 編號
         summary_groups = {g["id"] for g in db.groups() if g.get("summary_only")}
+        if settings.auto_analyze:
+            pending = {i["id"] for i in db.open_issues() if i["status"] == "open" and not i.get("analysis")}
+            targets = sorted(touched | pending)
+        else:
+            targets = sorted(touched)
+        updated: set[str] = set()
         for issue_id in targets:
             issue = db.issue(issue_id)
             if issue["status"] in ("resolved", "wontfix", "in_progress"):
@@ -135,25 +139,77 @@ def digest(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
                 if issue["status"] == "open":
                     db.update_issue(issue_id, now, status="collected")
                 continue
-            sid = issue.get("system_id") or UNKNOWN
-            sys_repo = systems.repo(sid)
-            if sys_repo is not None and sid not in updated and settings.repo_auto_update and sys_repo.exists():
-                _safe_update(sys_repo)
-                updated.add(sid)
-            usable = sys_repo if (sys_repo is not None and sys_repo.exists()) else None
-            analysis = llm.analyze(
-                {"id": issue_id, "system": systems.name(sid), "title": issue["title"], "kind": issue["kind"],
-                 "summary": issue["summary"], "module": issue["module"]},
-                _feedback_payload(db, issue_id), systems.context(sid), repo=usable,
-                knowledge_file=systems.knowledge_file(sid))
-            db.update_issue(issue_id, now, analysis=analysis.model_dump(), priority=analysis.priority,
-                            status="analyzed")
+            if settings.auto_analyze:
+                _analyze_issue(db, llm, settings, systems, issue_id, now, updated)
         res.touched_issue_ids = sorted(touched)
 
         # ---- 4. 日報 ----
         res.report_name = _write_digest_report(db, settings, res, now, systems)
         res.admin_summary = _admin_digest_summary(db, res, systems)
         return res
+
+
+def _analyze_issue(db: DB, llm: LLM, settings: Settings, systems: Systems, issue_id: int, now: datetime,
+                   updated: set[str]) -> None:
+    """讀該系統的程式碼，分析這個問題怎麼改（最耗 AI 額度的一步）。"""
+    issue = db.issue(issue_id)
+    sid = issue.get("system_id") or UNKNOWN
+    sys_repo = systems.repo(sid)
+    if sys_repo is not None and sid not in updated and settings.repo_auto_update and sys_repo.exists():
+        _safe_update(sys_repo)
+        updated.add(sid)
+    usable = sys_repo if (sys_repo is not None and sys_repo.exists()) else None
+    analysis = llm.analyze(
+        {"id": issue_id, "system": systems.name(sid), "title": issue["title"], "kind": issue["kind"],
+         "summary": issue["summary"], "module": issue["module"]},
+        _feedback_payload(db, issue_id), systems.context(sid), repo=usable,
+        knowledge_file=systems.knowledge_file(sid))
+    fields = {"analysis": analysis.model_dump(), "priority": analysis.priority, "analysis_requested": False}
+    if issue["status"] in ("open", "collected", "analyzed"):
+        fields["status"] = "analyzed"
+    db.update_issue(issue_id, now, **fields)
+
+
+def request_analysis(db: DB, issue_id: int, now: datetime) -> str:
+    """管理者要求分析某個問題。回傳空字串＝已排入；否則回傳不能分析的原因。"""
+    i = db.issue(issue_id)
+    if not i:
+        return "找不到這個問題編號"
+    if i["status"] in ("resolved", "wontfix"):
+        return "這個問題已經結案，不需要分析"
+    db.update_issue(issue_id, now, analysis_requested=True)
+    return ""
+
+
+def analyze_requested(db: DB, llm: LLM, settings: Settings, now: datetime | None = None,
+                      systems: Systems | None = None) -> str:
+    """分析所有被要求分析的問題，回傳給管理者的摘要。"""
+    now = now or now_in(settings)
+    systems = _resolve_systems(settings, None, systems)
+    done, failed = [], []
+    with RUN_LOCK:
+        updated: set[str] = set()
+        for i in db.all_issues():
+            if not i.get("analysis_requested") or i["status"] in ("resolved", "wontfix"):
+                continue
+            try:
+                _analyze_issue(db, llm, settings, systems, i["id"], now, updated)
+                done.append(i["id"])
+            except Exception as e:  # noqa: BLE001
+                log.exception("分析 #%s 失敗", i["id"])
+                db.update_issue(i["id"], now, analysis_requested=False)
+                failed.append(f"#{i['id']}：{str(e)[:120]}")
+    lines = []
+    for iid in done:
+        iss = db.issue(iid)
+        a = json.loads(iss["analysis"])
+        files = "、".join(f["path"] for f in a.get("files_to_change", [])[:3])
+        lines.append(f"🔍 #{iid} {iss['title']}（{systems.name(iss.get('system_id'))}）分析完成\n"
+                     f"原因：{a['root_cause'][:120]}" + (f"\n檔案：{files}" if files else "")
+                     + f"\n修改指示：/fix {iid}")
+    if failed:
+        lines.append("⚠️ 分析失敗：" + "；".join(failed))
+    return "\n\n".join(lines) or "沒有等待分析的問題。"
 
 
 def _cluster_system(db: DB, llm: LLM, sid: str, new_fb: list[dict], now: datetime) -> set[int]:
@@ -244,6 +300,8 @@ def _issue_md(db: DB, issue_id: int, today: str) -> str:
         if a.get("files_to_change"):
             out.append("  - 建議修改的檔案：")
             out += [f"    - `{f['path']}`：{f['change']}" for f in a["files_to_change"]]
+    elif i["status"] in ("open", "collected"):
+        out.append(f"- （尚未分析：要知道怎麼改，在後台問題頁按「分析這個問題」或私訊 `/analyze {i['id']}`）")
     if i["resolution_note"]:
         out.append(f"- 處理：{i['resolution_note']}｜{i['resolution_location'] or ''}")
     return "\n".join(out)
@@ -321,7 +379,7 @@ def _admin_digest_summary(db: DB, res: DigestResult, systems: Systems) -> str:
             cos = "、".join(db.group_label(g) for g in db.issue_groups(i))
             lines.append(f"{tag} #{i} [{iss['priority'] or '-'}] {iss['title']}（{cos}）")
         lines.append("")
-    lines.append("🔁 共同問題　👤 單一單位\n看細節：/issue 編號　改完：/resolve 編號 說明 | 位置")
+    lines.append("🔁 共同問題　👤 單一單位\n看細節：/issue 編號　分析怎麼改：/analyze 編號")
     return "\n".join(lines)
 
 
@@ -386,7 +444,7 @@ def set_issue_system(db: DB, issue_id: int, system_id: str, now: datetime) -> bo
         return False
     fields: dict = {"system_id": system_id}
     if i["status"] not in ("resolved", "wontfix"):
-        fields.update(analysis=None, priority=None, status="open")
+        fields.update(analysis=None, priority=None, status="open", analysis_requested=False)
     db.update_issue(issue_id, now, **fields)
     for f in db.issue_feedback(issue_id):
         db.s.update("feedback", f["id"], {"system_id": system_id})

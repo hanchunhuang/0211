@@ -25,6 +25,20 @@
     </div>
     {% endfor %}
 
+    {% if i.status not in ('resolved', 'wontfix') %}
+    <div class="card" style="margin-top:16px">
+      {% if i.analysis_requested %}
+        <meta http-equiv="refresh" content="20">
+        <strong>⏳ 分析中…</strong> <span class="sub">David 正在讀「{{ sysname(i.system_id) }}」的程式碼，約 1～3 分鐘，這頁會自動重新整理。</span>
+      {% else %}
+        <form method="post" action="/admin/issues/{{ i.id }}/analyze" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0">
+          <button class="primary">{{ '🔍 重新分析' if analysis else '🔍 分析這個問題' }}</button>
+          <span class="sub">讀「{{ sysname(i.system_id) }}」的程式碼，找出原因、要改的檔案和改法（會使用 AI 額度）</span>
+        </form>
+      {% endif %}
+    </div>
+    {% endif %}
+
     {% if analysis %}
     <h2>AI 分析</h2>
     <div class="card">
@@ -91,7 +105,7 @@
         </select>
         <button>改系統</button>
       </form>
-      <p class="sub" style="margin:6px 0 0">AI 判斷錯時可改。改了之後，下次整理會用新系統的程式碼重新分析。</p>
+      <p class="sub" style="margin:6px 0 0">AI 判斷錯時可改。改了之後，按上方「分析這個問題」用新系統的程式碼重新分析。</p>
     </div>
     <div class="card" style="margin-top:12px">
       <strong>公告紀錄</strong>
